@@ -20,7 +20,7 @@ import sys
 import time
 
 from . import auth, dispatch, runner, watcher
-from .mcp_client import AuthError, probe
+from .mcp_client import AuthError, NetworkError, probe
 from .notify import LOG
 
 
@@ -106,6 +106,20 @@ def cmd_status(_a):
     print(f"cron schedule   : {'installed' if runner.cron_installed() else 'not installed'}")
     print(f"last check      : {_ago(watcher.meta_get(conn, 'last_check', '0'))}")
     print(f"last tick       : {_ago(watcher.meta_get(conn, 'last_tick', '0'))}")
+    # Health first, in plain words. A 3-hour outage previously rendered as a
+    # perfectly healthy idle loop, because every one of those fields still
+    # looked normal while nothing was being checked.
+    consec = watcher.backoff_level(conn)
+    if consec:
+        print(
+            f"health          : FAILING - {consec} consecutive failure(s),"
+            f" last {_ago(watcher.meta_get(conn, 'last_error_at', '0'))}"
+        )
+        err = watcher.meta_get(conn, "last_error", "")
+        if err:
+            print(f"last error      : {err}")
+    else:
+        print("health          : ok")
     if bucket == "":
         print("bucket          : not drawn yet")
     else:
@@ -120,11 +134,17 @@ def cmd_status(_a):
 
 
 def cmd_probe(_a):
+    # probe() is a coroutine; it has to be driven by a loop. Calling it bare
+    # returned an un-awaited coroutine and then died on .get(), which made the
+    # one command for diagnosing a live problem unusable.
     try:
-        r = probe()
+        r = asyncio.run(probe())
     except AuthError as e:
         print("probe failed: auth:", e)
         return 2
+    except NetworkError as e:
+        print("probe failed: network:", e)
+        return 1
     except Exception as e:
         print(f"probe failed: {type(e).__name__}: {e}")
         return 1

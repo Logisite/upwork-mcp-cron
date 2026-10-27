@@ -18,6 +18,10 @@ import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+# Re-exported so `from .mcp_client import AuthError` keeps working. The
+# canonical definitions live in auth, next to the code that raises them.
+from .auth import AuthError, NetworkError  # noqa: F401
+
 MCP_URL = "https://mcp.upwork.com/mcp"
 ORG_UID = "2028571967613634984"
 
@@ -52,10 +56,6 @@ def _require_token() -> str:
     return tok["access_token"]
 
 
-class AuthError(Exception):
-    """Token missing, expired past refresh, or rejected by the server."""
-
-
 class Session:
     """An initialized MCP session held open across checks."""
 
@@ -68,35 +68,50 @@ class Session:
     async def __aenter__(self) -> "Session":
         self._stack = contextlib.AsyncExitStack()
         await self._stack.__aenter__()
-        headers = dict(DEFAULT_HEADERS)
-        headers["Authorization"] = f"Bearer {self.token}"
-        http_client = await self._stack.enter_async_context(
-            httpx2.AsyncClient(
-                headers=headers,
-                timeout=httpx2.Timeout(self.timeout),
-                follow_redirects=True,
+        # Everything past this point can fail after the SDK has already opened
+        # an anyio task group. If the failure escapes __aenter__, nothing ever
+        # unwinds the stack: the caller discards the half-built context and the
+        # garbage collector finalises the async generator later, from a
+        # DIFFERENT task. anyio rejects that ("Attempted to exit cancel scope
+        # in a different task than it was entered in") and the orphaned cancel
+        # scope then cancels unrelated work, which is how a plain ConnectTimeout
+        # used to surface as an unexplained CancelledError.
+        try:
+            headers = dict(DEFAULT_HEADERS)
+            headers["Authorization"] = f"Bearer {self.token}"
+            http_client = await self._stack.enter_async_context(
+                httpx2.AsyncClient(
+                    headers=headers,
+                    timeout=httpx2.Timeout(self.timeout),
+                    follow_redirects=True,
+                )
             )
-        )
-        streams = await self._stack.enter_async_context(
-            streamable_http_client(
-                MCP_URL, http_client=http_client, terminate_on_close=False
+            streams = await self._stack.enter_async_context(
+                streamable_http_client(
+                    MCP_URL, http_client=http_client, terminate_on_close=False
+                )
             )
-        )
-        self._session = await self._stack.enter_async_context(
-            ClientSession(streams[0], streams[1])
-        )
-        await self._session.initialize()
-        tools = await self._session.list_tools()
-        global _request_count
-        # initialize + notifications/initialized + tools/list
-        _request_count += 3
-        for t in tools.tools:
-            if t.name.endswith("find_jobs"):
-                self.tool = t.name
-                break
-        if not self.tool:
-            raise RuntimeError("find_jobs tool not present on server")
-        return self
+            self._session = await self._stack.enter_async_context(
+                ClientSession(streams[0], streams[1])
+            )
+            await self._session.initialize()
+            tools = await self._session.list_tools()
+            global _request_count
+            # initialize + notifications/initialized + tools/list
+            _request_count += 3
+            for t in tools.tools:
+                if t.name.endswith("find_jobs"):
+                    self.tool = t.name
+                    break
+            if not self.tool:
+                raise RuntimeError("find_jobs tool not present on server")
+            return self
+        except BaseException as e:
+            # Unwind here, in the task that entered it, so the real exception
+            # propagates instead of a cancellation from a leaked scope.
+            with contextlib.suppress(BaseException):
+                await self._stack.__aexit__(type(e), e, e.__traceback__)
+            raise
 
     async def __aexit__(self, *exc):
         return await self._stack.__aexit__(*exc)

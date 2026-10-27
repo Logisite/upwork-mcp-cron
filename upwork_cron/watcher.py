@@ -21,7 +21,14 @@ from datetime import datetime
 from pathlib import Path
 
 from . import auth, dispatch
-from .mcp_client import AuthError, clean_url, fetch_page, get_job, session
+from .mcp_client import (
+    AuthError,
+    NetworkError,
+    clean_url,
+    fetch_page,
+    get_job,
+    session,
+)
 from .notify import log
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -50,6 +57,16 @@ LATE_NOTIFY_SEC = 900       # 15 min: surfaced late, excluded from latency stats
 
 REAUTH_NAG_SEC = 6 * 3600
 BACKOFF_CAP_SEC = 1800
+BACKOFF_LEVEL_CAP = 6
+BACKOFF_BASE_SEC = 30
+
+# While backing off, wake this often to re-test the host instead of sleeping
+# the whole penalty in one uninterruptible block. A bare TCP connect costs
+# ~0.25s and needs no token, so recovery lands in seconds rather than up to
+# BACKOFF_CAP_SEC. This only shortens the wait for FRESH jobs; it never widens
+# the notify window.
+BACKOFF_PROBE_SEC = 5.0
+PROBE_TIMEOUT_SEC = 3.0
 
 QUERIES = [
     ("smart_search", {"limit": 10}),
@@ -269,8 +286,12 @@ async def check_once(conn, sess) -> None:
             unique.append((j, pub_ts))
     unique.sort(key=lambda x: x[1])  # oldest first
     notified = 0
+    skipped_stale = 0
     for j, pub_ts in unique:
         if not _notifyable(pub_ts):
+            # Counted, not just dropped. The window is deliberate; the silence
+            # was not: an outage produced no record of what it cost.
+            skipped_stale += 1
             continue
         # One extra call per NEW job only, to pull the facts that search
         # results omit: connects cost, client history, invite behaviour.
@@ -300,10 +321,10 @@ async def check_once(conn, sess) -> None:
         conn, reqs, total_pages, len(unique), notified, time.time() - t_start
     )
     meta_set(conn, "last_check", now())
-    meta_set(conn, "backoff_level", 0)
-    meta_set(conn, "backoff_until", 0)
+    clear_failures(conn)
     log(
         f"check done: {len(unique)} new, {notified} notified, "
+        f"{skipped_stale} skipped (older than {LATE_NOTIFY_SEC}s), "
         f"{total_pages} pages, {reqs} requests, {time.time() - t_start:.1f}s"
     )
 
@@ -341,12 +362,20 @@ def record_check(conn, requests: int, pages: int, new_jobs: int, notified: int, 
 
 
 def reauth_nag(conn) -> None:
+    """Tell the user their sign-in is needed. At most once per nag window.
+
+    Reached only for a genuine AuthError, never for a network fault: telling
+    someone to sign in again when their token is fine wastes their time and
+    teaches them to ignore the message.
+    """
     try:
         last = int(meta_get(conn, "reauth_at", "0"))
     except ValueError:
         last = 0
     if now() - last > REAUTH_NAG_SEC:
-        notify(
+        # dispatch.notify, not a bare notify: this module imports only `log`
+        # from .notify, and the bare name raised NameError, killing the loop.
+        dispatch.notify(
             "Upwork watcher: sign-in needed",
             "Run: uv run --project ~/projects/efficiency/upwork-cron upwork-cron auth",
             urgency="critical",
@@ -355,15 +384,70 @@ def reauth_nag(conn) -> None:
     log("auth missing/invalid")
 
 
-def _backoff(conn) -> int:
+def _backoff(conn, reason: str = "") -> int:
+    """Escalating wait after a failed check.
+
+    The stored level is clamped alongside the wait. It used to increment
+    without limit while the wait itself was capped, so the number in the
+    database stopped describing anything.
+    """
     try:
         lvl = int(meta_get(conn, "backoff_level", "0")) + 1
     except ValueError:
         lvl = 1
-    wait = min(30 * 2 ** min(lvl, 6), BACKOFF_CAP_SEC)
+    lvl = min(lvl, BACKOFF_LEVEL_CAP)
+    wait = min(BACKOFF_BASE_SEC * 2**lvl, BACKOFF_CAP_SEC)
     meta_set(conn, "backoff_level", lvl)
+    meta_set(conn, "consec_failures", lvl)
     meta_set(conn, "backoff_until", now() + wait)
+    if reason:
+        meta_set(conn, "last_error", reason[:200])
+        meta_set(conn, "last_error_at", now())
     return wait
+
+
+def clear_failures(conn) -> None:
+    """Reset the failure streak after a check that actually worked."""
+    meta_set(conn, "backoff_level", 0)
+    meta_set(conn, "consec_failures", 0)
+    meta_set(conn, "backoff_until", 0)
+
+
+def _host_reachable(host: str = "mcp.upwork.com", port: int = 443) -> bool:
+    """Can we open a TCP connection to the MCP host right now?
+
+    Deliberately not an MCP call: no token, no handshake, ~0.25s. It answers
+    only "is the network up", which is all the backoff loop needs to know
+    before spending a real request.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=PROBE_TIMEOUT_SEC):
+            return True
+    except OSError:
+        return False
+
+
+async def sleep_backoff(conn, wait: int) -> None:
+    """Wait out a backoff, but return early the moment the host is reachable.
+
+    A single asyncio.sleep(BACKOFF_CAP_SEC) cannot observe recovery, so the
+    loop's retry schedule was pure luck. This re-tests every BACKOFF_PROBE_SEC
+    so a restored network is picked up in seconds.
+    """
+    deadline = now() + wait
+    while True:
+        remaining = deadline - now()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(BACKOFF_PROBE_SEC, remaining))
+        if now() >= deadline:
+            return
+        if await asyncio.to_thread(_host_reachable):
+            log(
+                f"host reachable {deadline - now()}s early; "
+                "ending backoff and retrying now"
+            )
+            return
 
 
 async def open_session(token: str):
@@ -387,20 +471,39 @@ async def close_session(ctx) -> None:
         await ctx.__aexit__(None, None, None)
     except (KeyboardInterrupt, SystemExit):
         raise
-    except BaseException:
-        # Includes CancelledError from orphaned SDK scopes during teardown,
-        # and RuntimeError from exiting a never-entered context. Either way
-        # there is nothing left worth keeping open.
-        pass
+    except asyncio.CancelledError as e:
+        # Swallowed so a torn-down session cannot fail an otherwise good check,
+        # but no longer silent: orphaned SDK scopes are a real leak and were
+        # invisible because this was a bare `except BaseException: pass`.
+        log(f"session teardown cancelled ({_failure_detail(e)})")
+    except Exception as e:
+        log(f"session teardown failed ({_failure_detail(e)})")
 
 
 async def fresh_token() -> str:
-    """Access token, refreshing silently. AuthError on any token problem so
-    callers take the re-auth path instead of retrying with a dead token."""
+    """Access token, refreshing silently.
+
+    Raises NetworkError when the token endpoint is merely unreachable and
+    AuthError only when the credential is actually bad. Wrapping every
+    exception as AuthError made a dead proxy or a DNS blip look like an
+    expired login, which prompted a pointless re-sign-in and skipped backoff.
+    """
     try:
         tok = auth.refresh()
+    except NetworkError as e:
+        raise NetworkError(f"token refresh: {e}") from e
+    except AuthError:
+        raise
+    except OSError as e:
+        # Belt and braces. _token_request already wraps transport faults, but
+        # URLError, TimeoutError and ConnectionError are all OSError, and none
+        # of them may ever be read as an auth problem regardless of which
+        # layer let them through.
+        raise NetworkError(f"token refresh: {e}") from e
     except Exception as e:
-        raise AuthError(f"refresh failed: {e}")
+        # Anything else here is a malformed token file or similar: that is a
+        # credential problem, and re-auth is the right answer.
+        raise AuthError(f"refresh failed: {e}") from e
     if not tok or not tok.get("access_token"):
         raise AuthError("no token stored")
     return tok["access_token"]
@@ -418,15 +521,92 @@ def request_shutdown() -> None:
 
 
 def _dns_note() -> str:
-    """What does this machine's resolver say about the MCP host? A sinkhole
-    answer (0.0.0.0 / ::) means DNS-level blocking, not an Upwork outage."""
+    """What does this machine's resolver say about the MCP host?
+
+    Returns an EMPTY STRING when DNS is healthy. Those addresses are the
+    provider's real ones, and logging them on every failure reads like a DNS
+    fault when the fault was a connect timeout or a dropped stream. Only a
+    genuine anomaly is worth a line: a sinkhole answer (0.0.0.0 / ::) means
+    DNS-level blocking, and a resolution failure means the resolver is down.
+    """
     try:
         addrs = sorted({i[4][0] for i in socket.getaddrinfo("mcp.upwork.com", 443)})
     except Exception as e:
-        return f"resolver failed: {e}"
+        return f"DNS resolution failed: {e}"
     if any(a in ("0.0.0.0", "::") for a in addrs):
-        return f"resolver returns sinkhole {addrs} for mcp.upwork.com"
-    return f"resolver returns {addrs}"
+        return f"DNS sinkholed {addrs} for mcp.upwork.com"
+    return ""
+
+
+def _exception_chain(e: BaseException, depth: int = 5) -> str:
+    """Flatten an exception and its causes into one readable line.
+
+    The MCP SDK raises CancelledError with the real fault (ConnectTimeout,
+    ReadError, ...) buried in __cause__/__context__. Reporting only the
+    CancelledError threw the diagnosis away and left stderr.log as the sole
+    source of truth.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and len(parts) < depth and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur).strip()
+        parts.append(f"{type(cur).__name__}: {msg}" if msg else type(cur).__name__)
+        cur = cur.__cause__ or cur.__context__
+    return " <- ".join(parts)
+
+
+def _failure_detail(e: BaseException) -> str:
+    """Human-readable cause for a failed check, plus DNS only if it misbehaved."""
+    parts = [_exception_chain(e)]
+    note = _dns_note()
+    if note:
+        parts.append(note)
+    return "; ".join(p for p in parts if p)
+
+
+# anyio reports every transport fault the same way: "Cancelled via cancel
+# scope <hex> <- WouldBlock". That names no cause, it just buries the real
+# diagnosis under a scope id. Dropped unless something specific is chained
+# below it.
+_SDK_NOISE = ("WouldBlock", "Cancelled via cancel scope", "CancelledError")
+
+
+def _meaningful_chain(e: BaseException) -> str:
+    """The exception chain with anyio's contentless markers removed."""
+    parts = [
+        p
+        for p in _exception_chain(e).split(" <- ")
+        if not any(marker in p for marker in _SDK_NOISE)
+    ]
+    return " <- ".join(parts)
+
+
+async def _cancel_detail(e: BaseException) -> str:
+    """Cause for a cancelled check.
+
+    The MCP SDK runs its requests in an anyio task group. When one of those
+    fails, the group cancels the awaiting task and keeps the original
+    exception to itself, so all that escapes is a bare CancelledError with no
+    message and an unrelated context. Rather than report that, re-test the
+    host directly and state what is actually wrong.
+    """
+    parts = []
+    chain = _meaningful_chain(e)
+    if chain:
+        parts.append(chain)
+    note = _dns_note()
+    if note:
+        parts.append(note)
+    if not await asyncio.to_thread(_host_reachable):
+        parts.append("host unreachable: TCP connect to mcp.upwork.com:443 failed")
+    elif not chain:
+        parts.append(
+            "host reachable, so not the network "
+            "(SDK task-group teardown; see stderr.log)"
+        )
+    return "; ".join(parts) or "cancelled with no detail"
 
 
 async def _run_check(conn) -> tuple:
@@ -449,11 +629,13 @@ async def _run_check(conn) -> tuple:
     except (KeyboardInterrupt, SystemExit):
         raise
     except AuthError as e:
-        return ("auth", str(e))
-    except asyncio.CancelledError:
-        return ("cancelled", _dns_note())
+        return ("auth", _failure_detail(e))
+    except NetworkError as e:
+        return ("network", _failure_detail(e))
+    except asyncio.CancelledError as e:
+        return ("cancelled", await _cancel_detail(e))
     except Exception as e:
-        return ("error", str(e))
+        return ("error", _failure_detail(e))
 
 
 async def run_loop() -> None:
@@ -480,6 +662,16 @@ async def run_loop() -> None:
             continue
         b = int(bucket)
         if b <= 0:
+            # A backoff recorded before a restart still applies; without this
+            # the crash-loop restarts burned through the penalty immediately.
+            try:
+                pending = int(meta_get(conn, "backoff_until", "0") or 0)
+            except ValueError:
+                pending = 0
+            if pending > now():
+                left = pending - now()
+                log(f"resuming backoff, {left}s remaining")
+                await sleep_backoff(conn, left)
             # time to check; isolated in a child task (see _run_check)
             try:
                 checker = asyncio.create_task(_run_check(conn))
@@ -488,20 +680,31 @@ async def run_loop() -> None:
                 raise
             except asyncio.CancelledError:
                 raise  # not from a check (those are strings now): real shutdown
+            if status == "ok":
+                nb = draw_bucket()
+                meta_set(conn, "bucket", nb)
+                log(f"bucket redrawn: {nb}s")
+                await asyncio.sleep(1)
+                continue
+            # Every failure class shares one escalating, probe-aware backoff.
+            # Auth used to take a flat 60s and never escalate, so a persistent
+            # auth problem retried forever at a fixed rate.
             if status == "auth":
                 log(f"auth error: {detail}")
                 reauth_nag(conn)
-                await asyncio.sleep(60)
-                continue
-            if status != "ok":
+            else:
                 log(f"check {status}: {detail}")
-                wait = _backoff(conn)
-                await asyncio.sleep(wait)
-                continue
-            # fresh bucket for next cycle
-            nb = draw_bucket()
-            meta_set(conn, "bucket", nb)
-            log(f"bucket redrawn: {nb}s")
+            wait = _backoff(conn, f"{status}: {detail}")
+            log(f"backoff level {backoff_level(conn)}, retrying in {wait}s")
+            await sleep_backoff(conn, wait)
+            continue
         else:
             meta_set(conn, "bucket", b - 1)
         await asyncio.sleep(1)
+
+
+def backoff_level(conn) -> int:
+    try:
+        return int(meta_get(conn, "backoff_level", "0"))
+    except ValueError:
+        return 0

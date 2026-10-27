@@ -29,6 +29,19 @@ TOKEN_PATH = Path(__file__).resolve().parent.parent / "data" / "token.json"
 PKCE = "/.well-known/pkce"
 
 
+class AuthError(Exception):
+    """The credential itself is bad: missing, revoked, or rejected."""
+
+
+class NetworkError(Exception):
+    """The token endpoint could not be reached, or answered unusably.
+
+    Distinct from AuthError on purpose. Both arrive from the same call site,
+    but only one of them means "the user must sign in again". Collapsing them
+    turns every proxy wobble or DNS failure into a bogus re-auth prompt.
+    """
+
+
 class _Callback(http.server.BaseHTTPRequestHandler):
     holder: dict = {}
 
@@ -63,7 +76,18 @@ def _token_request(form: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"token endpoint {e.code}: {e.read().decode()[:400]}")
+        # Must precede the URLError branch: HTTPError subclasses URLError.
+        body = e.read().decode(errors="replace")[:400]
+        # 400/401/403 mean the credential is the problem. 5xx and 429 mean the
+        # server or the path to it is, and no amount of re-signing helps.
+        if e.code in (400, 401, 403):
+            raise AuthError(f"token endpoint {e.code}: {body}") from e
+        raise NetworkError(f"token endpoint {e.code}: {body}") from e
+    except json.JSONDecodeError as e:
+        # Usually a captive portal or proxy error page served with a 200.
+        raise NetworkError(f"token endpoint returned non-JSON: {e}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise NetworkError(f"token endpoint unreachable: {e}") from e
 
 
 def _save(data: dict) -> None:
