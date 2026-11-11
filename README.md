@@ -6,8 +6,25 @@ each one. Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SD
 - **Linux / Plasma / Termux:** desktop notifications via `notify-send` or Termux
   (see below).
 - **Windows 10/11 (per-user):** Windows toast notifications with Task Scheduler
-  keepalive. See **[README-WINDOWS.md](README-WINDOWS.md)** for the installer
-  (`install.cmd`), data locations, and troubleshooting.
+  keepalive. See **[README-WINDOWS.md](README-WINDOWS.md)** for details.
+
+## Windows installation
+
+Requirements: Windows 10/11, **Python 3.10+** installed (`py -3`), no admin rights.
+
+From the extracted/cloned project folder, run:
+
+```bat
+install.cmd
+```
+
+This copies the app to `%LOCALAPPDATA%\upwork-cron`, creates a venv, installs
+dependencies, runs `upwork-cron auth`, installs the per-user `\UpworkCron` Task
+Scheduler job, starts the watcher, and sends a test toast. Re-run to upgrade
+(app code only; data/token/db/logs preserved).
+
+Uninstall: `uninstall.cmd` (add `-PurgeData` to remove token/db/logs). Full
+paths, commands, and troubleshooting: **[README-WINDOWS.md](README-WINDOWS.md)**.
 
 ---
 
