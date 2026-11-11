@@ -21,6 +21,7 @@ from mcp.client.streamable_http import streamable_http_client
 # Re-exported so `from .mcp_client import AuthError` keeps working. The
 # canonical definitions live in auth, next to the code that raises them.
 from .auth import AuthError, NetworkError  # noqa: F401
+from .paths import TOKEN_PATH
 
 MCP_URL = "https://mcp.upwork.com/mcp"
 ORG_UID = "2028571967613634984"
@@ -29,8 +30,6 @@ DEFAULT_HEADERS = {
     "User-Agent": "upwork-cron/0.2.0 (python-mcp-sdk)",
     "Accept": "application/json, text/event-stream",
 }
-
-TOKEN_PATH = Path(__file__).resolve().parent.parent / "data" / "token.json"
 
 # Live request counter. Incremented on every real MCP round trip so the stats
 # command reports what actually went over the wire, not an inference from page
@@ -50,7 +49,7 @@ def requests_made() -> int:
 def _require_token() -> str:
     if not TOKEN_PATH.exists():
         raise AuthError("no token stored; run 'upwork-cron auth'")
-    tok = json.loads(TOKEN_PATH.read_text())
+    tok = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
     if not tok.get("access_token"):
         raise AuthError("no access token stored; run 'upwork-cron auth'")
     return tok["access_token"]

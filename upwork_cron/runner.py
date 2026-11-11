@@ -1,12 +1,12 @@
-"""Background runner: start / stop the watcher, and own the cron schedule.
+"""Background runner: start / stop the watcher, and own its schedule.
 
-`start` installs the crontab entry (so it survives reboots) and launches the
-loop. `stop` kills the loop AND removes the crontab entry, so a stop is a real
-stop: cron will not resurrect the watcher. Any other crontab lines the user
-already had are preserved.
+`start` installs the schedule and launches the loop. `stop` removes the schedule
+and stops the loop, so a stop is a real stop. `ensure` only starts the loop if
+it is not already running and never touches the schedule.
 """
 
-import asyncio
+from __future__ import annotations
+
 import contextlib
 import os
 import signal
@@ -15,135 +15,146 @@ import sys
 import time
 from pathlib import Path
 
+from . import schedule
 from .notify import log
+from .paths import LOOP_LOG, PID, ROOT, STDERR_LOG, WATCH_LOG, ensure_data_dir
 
-DATA = Path(__file__).resolve().parent.parent / "data"
-PID = DATA / "watcher.pid"
-LOOP_LOG = DATA / "loop.log"
-STDERR_LOG = DATA / "stderr.log"
-WATCH_LOG = DATA / "watch.log"
-
-ROOT = Path(__file__).resolve().parent.parent
-RUN_SH = ROOT / "run.sh"
-CRON_LINE = f"* * * * * {RUN_SH}"
+# Windows process flags
+_DETACHED_PROCESS = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_STILL_ACTIVE = 259
 
 
-def running_pid() -> int | None:
-    """Live loop pid, or None only when we can prove nothing is running.
-
-    Only ProcessLookupError proves the process is gone. A ValueError (empty
-    or corrupt pid file) or PermissionError says nothing about the process,
-    so treating those as "dead" caused start() to spawn a duplicate loop
-    while the real one was still running.
-    """
+def _read_pid() -> int | None:
     if not PID.exists():
         return None
     try:
-        pid = int(PID.read_text().strip())
-    except ValueError:
+        return int(PID.read_text(encoding="utf-8").strip())
+    except Exception:
         log("pid file corrupt; leaving it in place")
         return None
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied -> probably alive
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            if code.value != _STILL_ACTIVE:
+                return False
+            # Best-effort guard: ensure it looks like our Python process.
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    name = Path(buf.value).name.lower()
+                    if name in {"python.exe", "pythonw.exe", "python", "pythonw"}:
+                        return True
+                    # Some launchers; be conservative and treat as alive.
+                    return True
+            except Exception:
+                return True
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def _posix_pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return pid
+        return True
     except ProcessLookupError:
-        PID.unlink(missing_ok=True)
-        return None
+        return False
     except PermissionError:
-        # Alive, we just cannot signal it.
+        return True
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _windows_pid_alive(pid)
+    return _posix_pid_alive(pid)
+
+
+def running_pid() -> int | None:
+    """Live loop pid, or None when we can prove nothing is running."""
+    pid = _read_pid()
+    if pid is None:
+        return None
+    if pid_alive(pid):
         return pid
-
-
-def _read_crontab() -> list[str]:
     try:
-        out = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True, timeout=10
-        )
-        if out.returncode != 0:
-            return []
-        return out.stdout.splitlines()
-    except Exception as e:
-        log(f"crontab read failed: {e}")
-        return []
+        PID.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
 
 
 def cron_installed() -> bool:
-    return any(str(RUN_SH) in line for line in _read_crontab())
+    return schedule.installed()
+
+
+def schedule_installed() -> bool:
+    return schedule.installed()
 
 
 def install_cron() -> bool:
-    """Add our crontab line, preserving everything else. Idempotent."""
-    lines = _read_crontab()
-    if any(str(RUN_SH) in line for line in lines):
-        return True
-    lines.append(CRON_LINE)
-    try:
-        proc = subprocess.run(
-            ["crontab", "-"], input="\n".join(lines) + "\n",
-            capture_output=True, text=True, timeout=10,
-        )
-        if proc.returncode == 0:
-            log("crontab entry installed")
-            return True
-        log(f"crontab install failed: {proc.stderr.strip()}")
-    except Exception as e:
-        log(f"crontab install failed: {e}")
-    return False
+    return schedule.install()
 
 
 def remove_cron() -> bool:
-    """Remove only our crontab line, preserving everything else. Idempotent."""
-    lines = _read_crontab()
-    kept = [ln for ln in lines if str(RUN_SH) not in ln]
-    if len(kept) == len(lines):
-        return True
-    try:
-        if kept:
-            proc = subprocess.run(
-                ["crontab", "-"], input="\n".join(kept) + "\n",
-                capture_output=True, text=True, timeout=10,
-            )
-        else:
-            proc = subprocess.run(
-                ["crontab", "-r"], capture_output=True, text=True, timeout=10
-            )
-        if proc.returncode == 0:
-            log("crontab entry removed")
-            return True
-        log(f"crontab remove failed: {proc.stderr.strip()}")
-    except Exception as e:
-        log(f"crontab remove failed: {e}")
-    return False
+    return schedule.remove()
+
+
+def _python_executable(detached: bool = False) -> str:
+    exe = Path(sys.executable)
+    if detached and sys.platform == "win32":
+        cand = exe.with_name("pythonw.exe")
+        if cand.exists():
+            return str(cand)
+    return str(exe)
 
 
 def _spawn_loop(termux: bool = False) -> int | None:
-    DATA.mkdir(parents=True, exist_ok=True)
-    # Truncate the crash log on every spawn. A stale traceback sitting in
-    # loop.log is worse than no log at all: it reads as live and sends you
-    # debugging a bug that was fixed days ago. Fresh file, one header line.
-    with open(LOOP_LOG, "w") as fh:
+    ensure_data_dir()
+    with open(LOOP_LOG, "w", encoding="utf-8") as fh:
         fh.write(f"# loop.log - opened {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
         fh.write("# this file is TRUNCATED on every start. Anything here is from the CURRENT run.\n")
         fh.write("# live event log: watch.log   |   uncaught crashes land in this file\n")
-    out = open(LOOP_LOG, "a")
-    err = open(STDERR_LOG, "w")
+    out = open(LOOP_LOG, "a", encoding="utf-8")
+    err = open(STDERR_LOG, "w", encoding="utf-8")
     err.write(f"# stderr.log - opened {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
     env = dict(os.environ)
     if termux:
-        # The detached loop needs to know it is on a phone; -t is per
-        # invocation on the CLI side, so it is passed explicitly here.
         env["UPWORK_CRON_TERMUX"] = "1"
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "upwork_cron", "loop"],
-        cwd=str(ROOT),
-        stdout=out,
-        stderr=err,
-        start_new_session=True,
-        env=env,
-    )
-    PID.write_text(str(proc.pid))
-    # Stamp the pid before anyone else can check, so a concurrent start()
-    # sees this instance instead of concluding the loop is dead.
+    cmd = [_python_executable(detached=True), "-m", "upwork_cron", "loop"]
+    popen_kw = {
+        "cwd": str(ROOT),
+        "stdout": out,
+        "stderr": err,
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kw)
+    PID.write_text(str(proc.pid), encoding="utf-8")
     log(f"loop started pid {proc.pid}{' (termux)' if termux else ''}")
     return proc.pid
 
@@ -156,36 +167,30 @@ def start(termux: bool = False) -> int:
     if alive:
         was = dispatch.recorded_mode()
         print(f"loop already running (pid {alive}, {was} mode)")
-        if was != ("termux" if termux else "desktop"):
+        if was != ("termux" if termux else ("windows" if sys.platform == "win32" else "desktop")):
             print(f"  it is in {was} mode; stop then start again to change it")
         return 0
 
     pid = _spawn_loop(termux)
 
-    # Re-check immediately: if another start() raced us, both loops forked
-    # before either pid file was visible. One wins the flock and survives;
-    # the other exits immediately. Kill the loser rather than leaving two
-    # pollers on the same account.
+    # Re-check immediately: if another start raced us, one wins the lock.
     time.sleep(1.5)
     winner = running_pid()
-    if winner and winner != pid:
-        with contextlib.suppress(Exception):
-            os.kill(pid, signal.SIGTERM)
-        PID.write_text(str(winner))
+    if winner and winner != pid and pid_alive(pid):
+        _terminate_pid(pid)
+        PID.write_text(str(winner), encoding="utf-8")
         print(f"another start won the race; kept pid {winner}, killed {pid}")
         pid = winner
 
-    print(f"loop started (pid {pid}) — {'termux' if termux else 'desktop'} mode")
+    mode = "termux" if termux else ("windows" if sys.platform == "win32" else "desktop")
+    print(f"loop started (pid {pid}) — {mode} mode")
     if termux:
-        print("cron: skipped (dies with the Termux app; the 1s ticker drives it)")
+        print("schedule: skipped (dies with the Termux app; the 1s ticker drives it)")
         print("to run detached on a phone: leave Termux in the background,")
         print("do not force stop it, and consider: termux-wake-lock")
     else:
-        installed = install_cron()
-        print(
-            f"schedule: {'installed' if installed else 'FAILED to install'}"
-            f" ({CRON_LINE})"
-        )
+        installed = schedule.install()
+        print(f"schedule: {'installed' if installed else 'FAILED to install'} ({schedule.describe()})")
     print(f"live log: {WATCH_LOG}")
     print(f"crash log: {LOOP_LOG}")
     return 0
@@ -194,34 +199,85 @@ def start(termux: bool = False) -> int:
 def ensure() -> int:
     """Start the detached loop only if it is not already running.
 
-    Used by the cron safety net. Deliberately does NOT touch the crontab,
-    so a `stop` (which removes the schedule) stays stopped.
+    Used by the schedule safety net. Deliberately does NOT touch the schedule.
     """
     if running_pid():
         return 0
     from . import dispatch
 
-    _spawn_loop(dispatch.recorded_mode() == "termux")
+    mode = dispatch.recorded_mode()
+    _spawn_loop(mode == "termux")
     return 0
 
 
-def stop() -> int:
-    removed = remove_cron()
-    pid = running_pid()
-    if pid:
+def _terminate_pid(pid: int) -> None:
+    if not pid_alive(pid):
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, timeout=15,
+            )
+        except Exception:
+            pass
+        return
+    try:
         os.kill(pid, signal.SIGTERM)
-        for _ in range(30):
+    except Exception:
+        return
+    for _ in range(30):
+        time.sleep(0.1)
+        if not pid_alive(pid):
+            return
+    with contextlib.suppress(Exception):
+        os.kill(pid, signal.SIGKILL)
+
+
+def _request_graceful_stop() -> None:
+    try:
+        from . import watcher
+
+        conn = watcher.db()
+        watcher.request_stop(conn)
+        conn.close()
+    except Exception as e:
+        log(f"could not set stop flag: {e}")
+
+
+def stop() -> int:
+    removed = schedule.remove()
+    _request_graceful_stop()
+    pid = running_pid()
+    was_running = pid is not None
+    if pid:
+        # Give the ticker a chance to exit cleanly (it checks every ~1s).
+        for _ in range(80):
             time.sleep(0.1)
             if running_pid() is None:
+                pid = None
                 break
-        else:
-            os.kill(pid, signal.SIGKILL)
-        PID.unlink(missing_ok=True)
+        if pid and running_pid():
+            _terminate_pid(pid)
+            for _ in range(20):
+                time.sleep(0.1)
+                if running_pid() is None:
+                    pid = None
+                    break
+        try:
+            PID.unlink(missing_ok=True)
+        except OSError:
+            pass
         log("loop stopped")
-    print("loop stopped" if pid else "loop was not running")
+    if not was_running:
+        try:
+            PID.unlink(missing_ok=True)
+        except OSError:
+            pass
+    print("loop stopped" if was_running else "loop was not running")
     print(
         f"schedule: {'removed' if removed else 'FAILED to remove'}"
-        " — cron will no longer restart it"
+        " — it will no longer restart automatically"
     )
     return 0
 
@@ -229,23 +285,35 @@ def stop() -> int:
 def _handle_sigterm(*_a) -> None:
     from . import watcher
 
-    # Mark shutdown first so the run_loop CancelledError handler re-raises
-    # instead of swallowing a genuine stop as a transient transport failure.
     watcher.request_shutdown()
-    sys.exit(0)
+    try:
+        conn = watcher.db()
+        watcher.request_stop(conn)
+        conn.close()
+    except Exception:
+        pass
+    raise SystemExit(0)
 
 
 def loop() -> int:
-    """Long-running cadence loop. One check every CHECK_EVERY_SEC."""
+    """Long-running cadence loop."""
     from . import watcher
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    if hasattr(signal, "SIGINT"):
+        signal.signal(signal.SIGINT, _handle_sigterm)
     lock = watcher.acquire_lock()
     if lock is None:
         log("loop exiting: lock already held")
         return 0
     try:
+        import asyncio
+
         asyncio.run(watcher.run_loop())
     finally:
-        lock.close()
+        try:
+            lock.close()
+        except Exception:
+            pass
     return 0

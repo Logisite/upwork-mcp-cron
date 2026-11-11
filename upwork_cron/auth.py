@@ -2,8 +2,10 @@
 
 Standard authorization-code + PKCE (S256) against Upwork's public client
 document. Spins up a localhost callback listener, opens the browser, and
-stores access + refresh tokens at 0600.
+stores access + refresh tokens.
 """
+
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -11,20 +13,21 @@ import http.server
 import json
 import os
 import secrets
-import select
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import Optional
+
+from .paths import TOKEN_PATH, ensure_data_dir
 
 CLIENT_ID = "https://opencode.ai/oauth/opencode/client.json"
 AUTHZ_URL = "https://www.upwork.com/ab/account-security/oauth2/authorize"
 TOKEN_URL = "https://www.upwork.com/api/v3/oauth2/token"
 RESOURCE = "https://mcp.upwork.com/mcp"
-
-TOKEN_PATH = Path(__file__).resolve().parent.parent / "data" / "token.json"
 
 PKCE = "/.well-known/pkce"
 
@@ -91,7 +94,7 @@ def _token_request(form: dict) -> dict:
 
 
 def _save(data: dict) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     TOKEN_PATH.write_text(
         json.dumps(
             {
@@ -101,9 +104,14 @@ def _save(data: dict) -> None:
                 + int(data.get("expires_in", 3600))
                 - 30,
             }
-        )
+        ),
+        encoding="utf-8",
     )
-    os.chmod(TOKEN_PATH, 0o600)
+    if sys.platform != "win32":
+        try:
+            os.chmod(TOKEN_PATH, 0o600)
+        except OSError:
+            pass
 
 
 def login() -> dict:
@@ -130,19 +138,16 @@ def login() -> dict:
     redirect = (
         f"http://127.0.0.1:{port}/callback" if port else "http://127.0.0.1/callback"
     )
-    url = AUTHZ_URL
-    + "?"
-    + urllib.parse.urlencode(
-        {
-            "response_type": "code",
-            "client_id": CLIENT_ID,
-            "redirect_uri": redirect,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "state": state,
-            "resource": RESOURCE,
-        }
-    )
+    params = {
+        "response_type": "code",
+        "client_id": CLIENT_ID,
+        "redirect_uri": redirect,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "resource": RESOURCE,
+    }
+    url = AUTHZ_URL + "?" + urllib.parse.urlencode(params)
 
     print("Open this URL to approve:")
     print(url)
@@ -154,13 +159,19 @@ def login() -> dict:
     code = None
     if server is not None:
         print("Waiting for browser callback (5 min)...")
+        _Callback.holder.clear()
         deadline = time.time() + 300
-        while time.time() < deadline and "code" not in _Callback.holder:
-            r, _, _ = select.select([server], [], [], 1)
-            if r:
+        while time.time() < deadline and "code" not in _Callback.holder and "error" not in _Callback.holder:
+            # handle_request respects server.timeout (1s), which is portable.
+            # Avoid select() on a server socket: Windows select only accepts sockets.
+            try:
                 server.handle_request()
+            except Exception:
+                pass
         server.server_close()
         code = _Callback.holder.get("code")
+        if _Callback.holder.get("error") and not code:
+            raise AuthError(f"browser callback error: {_Callback.holder.get('error')}")
 
     if not code:
         print("No automatic callback. Paste the code from the browser address bar.")
@@ -186,7 +197,7 @@ def refresh() -> Optional[dict]:
     """Refresh the stored access token if it is expired. Returns new token."""
     if not TOKEN_PATH.exists():
         return None
-    tok = json.loads(TOKEN_PATH.read_text())
+    tok = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
     if tok.get("expires_at", 0) > time.time() + 60:
         return tok
     data = _token_request(
@@ -197,4 +208,4 @@ def refresh() -> Optional[dict]:
         }
     )
     _save(data)
-    return json.loads(TOKEN_PATH.read_text())
+    return json.loads(TOKEN_PATH.read_text(encoding="utf-8"))

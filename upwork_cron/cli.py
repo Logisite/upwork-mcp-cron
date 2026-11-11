@@ -16,12 +16,15 @@ import argparse
 import asyncio
 import json
 import os
+import platform
 import sys
 import time
+from pathlib import Path
 
-from . import auth, dispatch, runner, watcher
+from . import auth, dispatch, runner, schedule, watcher
 from .mcp_client import AuthError, NetworkError, probe
 from .notify import LOG
+from .paths import DATA, DB, LOOP_LOG, STDERR_LOG, TOKEN_PATH, WATCH_LOG, ensure_data_dir
 
 
 def _apply_termux_flag(a) -> None:
@@ -101,14 +104,16 @@ def cmd_status(_a):
     pid = runner.running_pid()
     stored = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     bucket = watcher.meta_get(conn, "bucket", "")
+    sched = schedule.query()
     print(f"background loop : {'running, pid ' + str(pid) if pid else 'stopped'}")
     print(f"mode            : {dispatch.recorded_mode()}")
-    print(f"cron schedule   : {'installed' if runner.cron_installed() else 'not installed'}")
+    print(f"schedule        : {'installed' if sched.get('installed') else 'not installed'}")
+    if sys.platform == "win32" and sched.get("status"):
+        print(f"  task status   : {sched.get('status')}")
+        if sched.get("last_run"):
+            print(f"  last run      : {sched.get('last_run')} (result {sched.get('last_result', '?')})")
     print(f"last check      : {_ago(watcher.meta_get(conn, 'last_check', '0'))}")
     print(f"last tick       : {_ago(watcher.meta_get(conn, 'last_tick', '0'))}")
-    # Health first, in plain words. A 3-hour outage previously rendered as a
-    # perfectly healthy idle loop, because every one of those fields still
-    # looked normal while nothing was being checked.
     consec = watcher.backoff_level(conn)
     if consec:
         print(
@@ -128,8 +133,10 @@ def cmd_status(_a):
         except ValueError:
             print("bucket          : ?")
     print(f"jobs stored     : {stored} (retention {watcher.RETENTION_DAYS}d)")
-    print(f"token           : {'stored' if auth.TOKEN_PATH.exists() else 'missing'}")
+    print(f"token           : {'stored' if TOKEN_PATH.exists() else 'missing'}")
+    print(f"data dir        : {DATA}")
     print(f"log             : {LOG}")
+    conn.close()
     return 0
 
 
@@ -311,11 +318,89 @@ def cmd_stats(a):
 
 
 def cmd_logs(a):
-    if not LOG.exists():
+    path = LOG
+    if getattr(a, "loop", False):
+        path = LOOP_LOG
+    elif getattr(a, "stderr", False):
+        path = STDERR_LOG
+    if not path.exists():
         print("no log yet")
         return 0
-    for line in LOG.read_text().splitlines()[-a.n :]:
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-a.n :]:
         print(line)
+    return 0
+
+
+def cmd_notify_test(_a):
+    dispatch.notify(
+        "Upwork Cron test notification",
+        "If you can read this, notifications are working.\nClick behavior depends on your platform settings.",
+        url="https://www.upwork.com/nx/search/jobs/",
+        sticky=True,
+    )
+    print(f"test notification sent via {dispatch.backend_name()} backend")
+    if sys.platform == "win32":
+        print("if nothing appeared: check Windows notification settings and Focus Assist")
+    return 0
+
+
+def cmd_doctor(a):
+    ensure_data_dir()
+    print("upwork-cron doctor\n")
+    print(f"  platform        {platform.platform()}")
+    print(f"  python          {sys.version.split()[0]} ({sys.executable})")
+    print(f"  data dir        {DATA}")
+    print(f"  db              {DB} ({'exists' if DB.exists() else 'missing'})")
+    print(f"  token           {'stored' if TOKEN_PATH.exists() else 'missing'} ({TOKEN_PATH})")
+    if TOKEN_PATH.exists():
+        try:
+            tok = json.loads(TOKEN_PATH.read_text(encoding='utf-8'))
+            exp = int(tok.get('expires_at', 0) or 0)
+            if exp:
+                left = exp - int(time.time())
+                print(f"  token expires   {_ago(exp)} ({left}s from now)")
+        except Exception as e:
+            print(f"  token read      error: {e}")
+    pid = runner.running_pid()
+    print(f"  loop            {'running, pid ' + str(pid) if pid else 'stopped'}")
+    sched = schedule.query()
+    print(f"  schedule        {'installed' if sched.get('installed') else 'not installed'} ({schedule.describe()})")
+    if sys.platform == 'win32':
+        if sched.get('status'):
+            print(f"  task status     {sched.get('status')}")
+        if sched.get('last_result') is not None:
+            print(f"  task last       {sched.get('last_run', '?')} result={sched.get('last_result')}")
+    print(f"  backend         {dispatch.backend_name()}")
+    if sys.platform == 'win32':
+        try:
+            from . import notify_windows
+            info = notify_windows.diagnose()
+            print(f"  windows toasts  {'ok' if info.get('available') else 'unavailable'} {info.get('version','')}".strip())
+            if info.get('error'):
+                print(f"    error         {info['error']}")
+        except Exception as e:
+            print(f"  windows toasts  error: {e}")
+    try:
+        conn = watcher.db()
+        lc = watcher.meta_get(conn, 'last_check', '0')
+        lt = watcher.meta_get(conn, 'last_tick', '0')
+        consec = watcher.backoff_level(conn)
+        print(f"  last check      {_ago(lc)}")
+        print(f"  last tick       {_ago(lt)}")
+        print(f"  health          {'ok' if not consec else f'FAILING ({consec})'}")
+        if consec:
+            err = watcher.meta_get(conn, 'last_error', '')
+            if err:
+                print(f"  last error      {err}")
+        conn.close()
+    except Exception as e:
+        print(f"  db/state        error: {e}")
+    print(f"  log             {LOG}")
+    print(f"  loop log        {LOOP_LOG}")
+    print(f"  stderr log      {STDERR_LOG}")
+    if getattr(a, 'send_test', False):
+        print()
+        cmd_notify_test(a)
     return 0
 
 
@@ -364,10 +449,10 @@ def main(argv=None):
             dict(action="store_true", help="also send a test notification"),
         ),
     )
-    add("start", cmd_start, "Start the watcher and install the cron schedule")
-    add("stop", cmd_stop, "Stop the watcher AND remove the cron schedule")
+    add("start", cmd_start, "Start the watcher and install its schedule")
+    add("stop", cmd_stop, "Stop the watcher AND remove its schedule")
     add("ensure", cmd_ensure, "Internal: start the loop only if not running")
-    add("status", cmd_status, "Loop state, bucket, jobs stored, token")
+    add("status", cmd_status, "Loop state, schedule, jobs stored, token")
     add("probe", cmd_probe, "One live MCP search, bypassing stored data")
     add("check", cmd_check, "Force one check right now")
     add("metrics", cmd_metrics, "Observed notify latency (posting to popup)")
@@ -381,6 +466,16 @@ def main(argv=None):
         ),
     )
     add("loop", lambda _a: runner.loop(), "Internal: the 1s bucket ticker")
+    add("notify-test", cmd_notify_test, "Send a sample notification to verify delivery")
+    add(
+        "doctor",
+        cmd_doctor,
+        "Diagnose installation, schedule, token, loop, and notifications",
+        send_test=(
+            ("--send-test",),
+            dict(action="store_true", help="also send a sample notification"),
+        ),
+    )
 
     p = sub.add_parser(
         "since",
@@ -402,6 +497,9 @@ def main(argv=None):
 
     p = sub.add_parser("logs", help="Print the last N log lines")
     p.add_argument("-n", type=int, default=30, help="how many lines (default 30)")
+    p.add_argument("--loop", action="store_true", help="show loop.log instead of watch.log")
+    p.add_argument("--stderr", action="store_true", help="show stderr.log instead of watch.log")
+    p.add_argument("-t", action="store_true", help="Termux mode for this run")
     p.set_defaults(fn=cmd_logs)
 
     args = ap.parse_args(argv)

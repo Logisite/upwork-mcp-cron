@@ -10,17 +10,17 @@ Every job seen is stored, not just notified ones, so "most recent in the
 last N minutes" is a local SQL query rather than another round trip.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
-import fcntl
 import random
 import socket
 import sqlite3
 import time
 from datetime import datetime
-from pathlib import Path
 
-from . import auth, dispatch
+from . import auth, dispatch, lockfile
 from .mcp_client import (
     AuthError,
     NetworkError,
@@ -30,10 +30,7 @@ from .mcp_client import (
     session,
 )
 from .notify import log
-
-DATA = Path(__file__).resolve().parent.parent / "data"
-DB = DATA / "state.db"
-LOCK = DATA / "watch.lock"
+from .paths import DB, ensure_data_dir
 
 # Bucket cadence. 90 base + 0..150 jitter, drained 1s per tick.
 BUCKET_BASE_SEC = 90
@@ -79,8 +76,8 @@ def now() -> int:
 
 
 def db() -> sqlite3.Connection:
-    DATA.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB, timeout=15)
+    ensure_data_dir()
+    conn = sqlite3.connect(str(DB), timeout=15)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS jobs(
             id TEXT PRIMARY KEY, title TEXT, url TEXT, pub TEXT, pub_ts INTEGER,
@@ -114,13 +111,22 @@ def meta_set(conn, k, v):
 
 def acquire_lock():
     """Non-blocking exclusive lock; None if another run holds it."""
-    DATA.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK, "w")
+    return lockfile.acquire()
+
+
+def request_stop(conn) -> None:
+    meta_set(conn, "stop_requested", 1)
+
+
+def clear_stop(conn) -> None:
+    meta_set(conn, "stop_requested", 0)
+
+
+def stop_requested(conn) -> bool:
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fh
-    except BlockingIOError:
-        return None
+        return int(meta_get(conn, "stop_requested", "0") or 0) != 0
+    except ValueError:
+        return False
 
 
 def parse_time(s: str) -> int:
@@ -432,15 +438,17 @@ async def sleep_backoff(conn, wait: int) -> None:
 
     A single asyncio.sleep(BACKOFF_CAP_SEC) cannot observe recovery, so the
     loop's retry schedule was pure luck. This re-tests every BACKOFF_PROBE_SEC
-    so a restored network is picked up in seconds.
+    so a restored network is picked up in seconds. Also exits early on stop.
     """
     deadline = now() + wait
     while True:
+        if stop_requested(conn):
+            return
         remaining = deadline - now()
         if remaining <= 0:
             return
         await asyncio.sleep(min(BACKOFF_PROBE_SEC, remaining))
-        if now() >= deadline:
+        if stop_requested(conn) or now() >= deadline:
             return
         if await asyncio.to_thread(_host_reachable):
             log(
@@ -647,7 +655,15 @@ async def run_loop() -> None:
     see is a genuine external shutdown, which re-raises.
     """
     conn = db()
+    # A requested stop from a previous run must not prevent this one from starting.
+    if stop_requested(conn):
+        clear_stop(conn)
+    log("loop running")
     while True:
+        if stop_requested(conn):
+            log("stop requested; loop exiting cleanly")
+            clear_stop(conn)
+            return
         meta_set(conn, "last_tick", now())
         # Prune every iteration so retention holds even while checks are
         # failing, not only on the success path.
@@ -672,6 +688,8 @@ async def run_loop() -> None:
                 left = pending - now()
                 log(f"resuming backoff, {left}s remaining")
                 await sleep_backoff(conn, left)
+                if stop_requested(conn):
+                    continue
             # time to check; isolated in a child task (see _run_check)
             try:
                 checker = asyncio.create_task(_run_check(conn))
@@ -680,6 +698,8 @@ async def run_loop() -> None:
                 raise
             except asyncio.CancelledError:
                 raise  # not from a check (those are strings now): real shutdown
+            if stop_requested(conn):
+                continue
             if status == "ok":
                 nb = draw_bucket()
                 meta_set(conn, "bucket", nb)

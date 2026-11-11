@@ -1,14 +1,16 @@
-"""Desktop notification delivery, resilient to cron having no session bus."""
+"""Notification delivery and logging, cross-platform."""
+
+from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .paths import LOG, LOOP_LOG, ensure_data_dir
+
 NOTIFY_SEND = "/usr/bin/notify-send"
-DATA = Path(__file__).resolve().parent.parent / "data"
-LOG = DATA / "watch.log"
-LOOP_LOG = DATA / "loop.log"
 LOG_MAX = 1_000_000      # rotate a file once it passes this
 LOG_KEEP = 5             # how many rotated generations to retain
 
@@ -19,7 +21,7 @@ def _rotate(path: Path) -> None:
     """Generational rotation: watch.log -> .1 -> .2 ... keeping LOG_KEEP."""
     if not path.exists() or path.stat().st_size <= LOG_MAX:
         return
-    DATA.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     oldest = path.with_suffix(path.suffix + f".{LOG_KEEP}")
     oldest.unlink(missing_ok=True)
     for i in range(LOG_KEEP - 1, 0, -1):
@@ -30,24 +32,26 @@ def _rotate(path: Path) -> None:
 
 
 def log(msg: str) -> None:
-    DATA.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     _rotate(LOG)
     _rotate(LOOP_LOG)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(LOG, "a") as f:
+    with open(LOG, "a", encoding="utf-8") as f:
         f.write(f"{ts} {msg}\n")
 
 
 def session_env() -> dict:
-    """Environment carrying the live Plasma session, found from plasmashell.
+    """Environment carrying the live desktop session (Linux/KDE helper).
 
-    Cron starts with almost nothing, and notify-send needs DISPLAY and a
-    session bus to reach the desktop. Read them from the running compositor
-    so this survives reboots and display renumbering.
+    On Windows this returns the current environment; Windows notifications do
+    not go through notify-send.
     """
     if _ENV_CACHE:
         return _ENV_CACHE
     env = dict(os.environ)
+    if sys.platform == "win32":
+        _ENV_CACHE.update(env)
+        return env
     try:
         pids = subprocess.run(
             ["pgrep", "-x", "plasmashell"],
@@ -75,7 +79,7 @@ def session_env() -> dict:
     except Exception as e:
         log(f"session_env: {e}")
 
-    uid = os.getuid()
+    uid = os.getuid() if hasattr(os, "getuid") else 0
     env.setdefault("HOME", str(Path.home()))
     env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
     env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
@@ -86,15 +90,13 @@ def session_env() -> dict:
 
 
 def notify(summary: str, body: str = "", urgency: str = "normal", sticky: bool = False) -> None:
-    """Fire a desktop notification.
-
-    sticky=True keeps it on screen until dismissed: Plasma treats a
-    notification with no expire-time as resident, and critical urgency
-    additionally survives the session's auto-hide timeout.
-    """
+    """Fire a desktop notification via notify-send (Linux/Plasma)."""
+    if sys.platform == "win32":
+        # Windows dispatch is handled by notify_windows; this is a fallback.
+        log(f"notify-send unavailable on Windows: {summary[:80]}")
+        return
     cmd = [NOTIFY_SEND, "-a", "Upwork Watcher", "-u", urgency]
     if sticky:
-        # 0 = never auto-expire in Plasma.
         cmd += ["-t", "0"]
     else:
         cmd += ["-t", "15000"]

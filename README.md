@@ -1,8 +1,13 @@
 # upwork-cron
 
-Watches the Upwork MCP server for new AI job posts and fires a sticky desktop
-notification for each one. Built on the official [`mcp`](https://pypi.org/project/mcp/)
-Python SDK.
+Watches the Upwork MCP server for new AI job posts and fires notifications for
+each one. Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SDK.
+
+- **Linux / Plasma / Termux:** desktop notifications via `notify-send` or Termux
+  (see below).
+- **Windows 10/11 (per-user):** Windows toast notifications with Task Scheduler
+  keepalive. See **[README-WINDOWS.md](README-WINDOWS.md)** for the installer
+  (`install.cmd`), data locations, and troubleshooting.
 
 ---
 
@@ -21,7 +26,8 @@ uv run upwork-cron auth            # (re)sign in via browser
 uv run upwork-cron start|stop      # background loop + cron schedule
 ```
 
-Every command has `--help`.
+Every command has `--help`. Useful cross-platform diagnostics: `notify-test`,
+`doctor` (`--send-test`), and `logs --loop` / `logs --stderr`.
 
 ---
 
@@ -125,29 +131,33 @@ Two layers:
 
 1. **The loop** does the work: 1 second ticker, detached, survives closing the
    terminal.
-2. **cron** fires `run.sh` every minute as a self-heal, calling
-   `upwork-cron ensure` which starts the loop only if it is not already running.
+2. **The schedule** is a 1-minute self-heal that runs `upwork-cron ensure`
+   (starts the loop only if it is not already running).
 
-`start` and `stop` own the crontab line, and only that line. Other crontab
-entries are preserved.
+- **Linux:** a user crontab line (`run.sh` / `ensure`). `start` and `stop` own
+  only that line and preserve other crontab entries.
+- **Windows:** a per-user Task Scheduler task `\UpworkCron` running
+  `pythonw.exe -m upwork_cron ensure` every minute (installed/removed by
+  `start`/`stop`).
 
-| Command | Loop | Cron |
+| Command | Loop | Schedule |
 |---|---|---|
 | `start` | starts | **installs** |
 | `stop` | stops | **removes** |
 | `ensure` | starts only if dead | untouched |
 
-`stop` is a **real stop**: cron is gone and nothing restarts the watcher.
-Verified by stopping and waiting past multiple cron boundaries.
-
-No systemd unit, because `systemctl --user` is degraded on this machine.
+`stop` is a **real stop**: the schedule is removed and nothing restarts the
+watcher. On Linux this was historically cron-only because `systemctl --user`
+was degraded on that machine.
 
 ---
 
 ## Auth
 
 `upwork-cron auth` runs PKCE (S256) against Upwork's public client document and
-stores tokens at `data/token.json` (0600). Refresh is silent and automatic.
+stores tokens in the data directory (`token.json`, mode 0600 on Unix). On
+Windows the default data directory is `%LOCALAPPDATA%\upwork-cron\data` (or
+`UPWORK_CRON_DATA` if set). Refresh is silent and automatic.
 
 If a token is rejected you get a **critical** "sign-in needed" notification
 rather than a generic error, at most once every 6 hours. Check failures back off
@@ -155,8 +165,12 @@ exponentially from 30s to 30 min; a successful check resets it immediately.
 
 ## Notifications
 
-Desktop env is read from the live Plasma session (`/proc/<plasmashell>/environ`)
-so it survives reboots and display renumbering. Sent sticky (`-t 0`).
+- **Linux (Plasma):** sent via `notify-send`; the desktop env is read from the
+  live Plasma session so it survives reboots and display renumbering.
+- **Windows:** sent as Windows toasts (`windows-toasts`); clicking opens the job.
+  Use `notify-test` / `doctor --send-test` and check notification settings/Focus
+  Assist if nothing appears.
+- **Termux:** Android notifications via Termux:API (`-t` / `tsetup`).
 
 ```
 Summary:  12m ago · 20 to 50 proposals
@@ -176,14 +190,22 @@ minutes under an hour, hours and minutes above.
 
 ```
 upwork_cron/
-  cli.py          argparse CLI
-  mcp_client.py   official-SDK MCP client, held session, paged fetch
-  watcher.py      bucket cadence, paging + ordering guard, storage, notify
-  auth.py         PKCE login + silent refresh
-  notify.py       desktop notifications + log rotation
-  runner.py       start/stop, cron install/remove, detached loop
-run.sh            cron self-heal entrypoint
-data/             token.json (0600), state.db, watch.log  (gitignored)
+  cli.py           argparse CLI (status/doctor/notify-test/...)
+  mcp_client.py    official-SDK MCP client, held session, paged fetch
+  watcher.py       bucket cadence, paging + ordering guard, storage, notify
+  auth.py          PKCE login + silent refresh
+  notify.py        logging + Linux desktop notifications
+  notify_windows.py  Windows toast notifications
+  dispatch.py      notification backend selection
+  schedule.py      cron (Linux) / Task Scheduler (Windows) ownership
+  runner.py        start/stop/ensure, detached loop, graceful stop
+  paths.py         platform-aware data/log paths
+  lockfile.py      cross-platform loop lock
+run.sh             cron self-heal entrypoint (Linux)
+install.cmd/.ps1   per-user Windows installer
+uninstall.cmd/.ps1 per-user Windows uninstaller
+README-WINDOWS.md  Windows-specific instructions
+data/              Linux/local project data (gitignored); Windows uses %LOCALAPPDATA%\upwork-cron\data
 ```
 
 ## Queries
