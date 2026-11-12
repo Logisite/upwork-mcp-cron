@@ -129,68 +129,85 @@ def login() -> dict:
     server = None
     port = None
     try:
-        server = http.server.HTTPServer(("127.0.0.1", 0), _Callback)
-        port = server.server_address[1]
-        server.timeout = 1
-    except OSError:
-        server = None
+        try:
+            server = http.server.HTTPServer(("127.0.0.1", 0), _Callback)
+            port = server.server_address[1]
+            server.timeout = 1
+        except OSError:
+            server = None
 
-    redirect = (
-        f"http://127.0.0.1:{port}/callback" if port else "http://127.0.0.1/callback"
-    )
-    params = {
-        "response_type": "code",
-        "client_id": CLIENT_ID,
-        "redirect_uri": redirect,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": state,
-        "resource": RESOURCE,
-    }
-    url = AUTHZ_URL + "?" + urllib.parse.urlencode(params)
+        redirect = (
+            f"http://127.0.0.1:{port}/callback"
+            if port
+            else "http://127.0.0.1/callback"
+        )
+        params = {
+            "response_type": "code",
+            "client_id": CLIENT_ID,
+            "redirect_uri": redirect,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "resource": RESOURCE,
+        }
+        url = AUTHZ_URL + "?" + urllib.parse.urlencode(params)
 
-    print("Open this URL to approve:")
-    print(url)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+        print("Open this URL to approve:")
+        print(url)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
 
-    code = None
-    if server is not None:
-        print("Waiting for browser callback (5 min)...")
-        _Callback.holder.clear()
-        deadline = time.time() + 300
-        while time.time() < deadline and "code" not in _Callback.holder and "error" not in _Callback.holder:
-            # handle_request respects server.timeout (1s), which is portable.
-            # Avoid select() on a server socket: Windows select only accepts sockets.
+        code = None
+        if server is not None:
+            print("Waiting for browser callback (5 min, Ctrl+C to cancel)...")
+            _Callback.holder.clear()
+            deadline = time.time() + 300
+            while (
+                time.time() < deadline
+                and "code" not in _Callback.holder
+                and "error" not in _Callback.holder
+            ):
+                # handle_request respects server.timeout (1s), which is
+                # portable. Avoid select() on a server socket: Windows
+                # select only accepts sockets.
+                try:
+                    server.handle_request()
+                except Exception:
+                    pass
+            code = _Callback.holder.get("code")
+            if _Callback.holder.get("error") and not code:
+                raise AuthError(
+                    f"browser callback error: {_Callback.holder.get('error')}"
+                )
+
+        if not code:
+            print("No automatic callback. Paste the code from the browser address bar.")
+            code = input("code> ").strip()
+        if not code:
+            raise RuntimeError("no authorization code captured")
+
+        data = _token_request(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect,
+                "client_id": CLIENT_ID,
+                "code_verifier": verifier,
+            }
+        )
+        _save(data)
+        print("Signed in. Tokens stored at", TOKEN_PATH)
+        return data
+    finally:
+        # Ctrl+C (or any other error) must not leave the localhost listener
+        # bound until the process exits.
+        if server is not None:
             try:
-                server.handle_request()
+                server.server_close()
             except Exception:
                 pass
-        server.server_close()
-        code = _Callback.holder.get("code")
-        if _Callback.holder.get("error") and not code:
-            raise AuthError(f"browser callback error: {_Callback.holder.get('error')}")
-
-    if not code:
-        print("No automatic callback. Paste the code from the browser address bar.")
-        code = input("code> ").strip()
-    if not code:
-        raise RuntimeError("no authorization code captured")
-
-    data = _token_request(
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect,
-            "client_id": CLIENT_ID,
-            "code_verifier": verifier,
-        }
-    )
-    _save(data)
-    print("Signed in. Tokens stored at", TOKEN_PATH)
-    return data
 
 
 def refresh() -> Optional[dict]:

@@ -13,11 +13,25 @@ $DataDir = Join-Path $InstallRoot 'data'
 $BinDir = Join-Path $InstallRoot 'bin'
 
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Stop-Cancelled {
+  Write-Host "`nUninstall cancelled." -ForegroundColor Yellow
+  Write-Host "Run the uninstaller again to finish removing upwork-cron."
+  exit 130
+}
+function Test-CancelledExit($code) {
+  return ($code -eq 130 -or $code -eq -1073741510)
+}
+
+trap [System.Management.Automation.PipelineStoppedException] {
+  Stop-Cancelled
+}
 
 Write-Step "Stopping watcher and removing schedule"
 if (Test-Path $Vpy) {
   & $Vpy -m upwork_cron stop
-  if ($LASTEXITCODE -ne 0) {
+  $stopRc = $LASTEXITCODE
+  if (Test-CancelledExit $stopRc) { Stop-Cancelled }
+  if ($stopRc -ne 0) {
     Write-Host "stop command failed (continuing with manual cleanup)." -ForegroundColor Yellow
   }
 }

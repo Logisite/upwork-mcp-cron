@@ -12,6 +12,21 @@ function Fail($msg) {
   Write-Host "Install did not complete."
   exit 1
 }
+function Stop-Cancelled {
+  Write-Host "`nInstall cancelled." -ForegroundColor Yellow
+  Write-Host "Re-run the installer to finish."
+  if ($DownloadedSrc) {
+    Remove-Item -Recurse -Force $DownloadedSrc -ErrorAction SilentlyContinue
+  }
+  exit 130
+}
+function Test-CancelledExit($code) {
+  return ($code -eq 130 -or $code -eq -1073741510)
+}
+
+trap [System.Management.Automation.PipelineStoppedException] {
+  Stop-Cancelled
+}
 
 if ($env:OS -ne 'Windows_NT') { Fail 'This installer is for Windows.' }
 if (-not $env:LOCALAPPDATA) {
@@ -43,6 +58,7 @@ if (-not $SrcDir -or
   if (-not $env:TEMP) { Fail 'TEMP is not set.' }
   $tmp = Join-Path $env:TEMP ("upcron-src-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  $DownloadedSrc = $tmp
   $zip = Join-Path $tmp 'source.zip'
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -61,7 +77,6 @@ if (-not $SrcDir -or
     Select-Object -First 1
   if (-not $top) { Fail 'Downloaded source did not contain pyproject.toml.' }
   $SrcDir = $top.FullName
-  $DownloadedSrc = $tmp
 }
 
 Write-Step "Locating Python 3.10+"
@@ -107,7 +122,9 @@ function Invoke-Py([string[]]$arguments) {
   if ($py.Args) { $all += $py.Args }
   $all += $arguments
   & $py.Exe @all
-  if ($LASTEXITCODE -ne 0) { throw "Python command failed: $($py.Exe) $($all -join ' ')" }
+  $rc = $LASTEXITCODE
+  if (Test-CancelledExit $rc) { Stop-Cancelled }
+  if ($rc -ne 0) { throw "Python command failed: $($py.Exe) $($all -join ' ')" }
 }
 
 Write-Step "Creating install directories"
@@ -117,7 +134,9 @@ Write-Step "Stopping any running watcher"
 $ExistingVpy = Join-Path $VenvDir 'Scripts\python.exe'
 if (Test-Path $ExistingVpy) {
   & $ExistingVpy -m upwork_cron stop
-  if ($LASTEXITCODE -ne 0) {
+  $existingRc = $LASTEXITCODE
+  if (Test-CancelledExit $existingRc) { Stop-Cancelled }
+  if ($existingRc -ne 0) {
     Write-Host "Existing watcher did not stop cleanly; continuing." -ForegroundColor Yellow
   }
 }
@@ -194,8 +213,11 @@ if (-not $SkipAuth) {
     Write-Host "Existing token found at $token; skipping browser sign-in."
   } else {
     Write-Host "A browser window will open so you can approve access. If it does not, copy the printed URL."
+    Write-Host "Press Ctrl+C to cancel."
     & $Vpy -m upwork_cron auth
-    if ($LASTEXITCODE -ne 0) { Fail 'Authentication did not complete.' }
+    $authRc = $LASTEXITCODE
+    if (Test-CancelledExit $authRc) { Stop-Cancelled }
+    if ($authRc -ne 0) { Fail 'Authentication did not complete.' }
   }
 } else {
   Write-Host "Skipping auth (--SkipAuth). Run: upcron auth"
@@ -204,7 +226,9 @@ if (-not $SkipAuth) {
 if (-not $SkipStart) {
   Write-Step "Starting watcher and installing schedule"
   & $Vpy -m upwork_cron start
-  if ($LASTEXITCODE -ne 0) { Fail 'Failed to start the watcher.' }
+  $startRc = $LASTEXITCODE
+  if (Test-CancelledExit $startRc) { Stop-Cancelled }
+  if ($startRc -ne 0) { Fail 'Failed to start the watcher.' }
 } else {
   Write-Host "Skipping start (--SkipStart). Run: upcron start"
 }

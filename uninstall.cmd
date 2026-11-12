@@ -19,12 +19,19 @@ if errorlevel 1 goto download_fail
 :run
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS%" %*
 set "RC=%ERRORLEVEL%"
+if "%RC%"=="130" goto cancelled
+if "%RC%"=="-1073741510" goto cancelled
 if not "%RC%"=="0" (
   echo.
   echo Uninstall failed with exit code %RC%.
   pause
 )
 exit /b %RC%
+
+:cancelled
+echo.
+echo Uninstall cancelled.
+exit /b 130
 
 :download_fail
 echo.

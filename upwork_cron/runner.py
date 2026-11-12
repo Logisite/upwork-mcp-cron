@@ -153,8 +153,17 @@ def _spawn_loop(termux: bool = False) -> int | None:
         popen_kw["creationflags"] = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
     else:
         popen_kw["start_new_session"] = True
-    proc = subprocess.Popen(cmd, **popen_kw)
-    PID.write_text(str(proc.pid), encoding="utf-8")
+    proc = None
+    try:
+        proc = subprocess.Popen(cmd, **popen_kw)
+        PID.write_text(str(proc.pid), encoding="utf-8")
+    except BaseException:
+        # Ctrl+C between the spawn and recording the PID must not orphan a
+        # detached watcher that `stop` can no longer find.
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+        raise
     log(f"loop started pid {proc.pid}{' (termux)' if termux else ''}")
     return proc.pid
 
@@ -171,29 +180,47 @@ def start(termux: bool = False) -> int:
             print(f"  it is in {was} mode; stop then start again to change it")
         return 0
 
-    pid = _spawn_loop(termux)
+    pid = None
+    try:
+        pid = _spawn_loop(termux)
+        # Re-check immediately: if another start raced us, one wins the lock.
+        time.sleep(1.5)
+        winner = running_pid()
+        if winner and winner != pid and pid_alive(pid):
+            _terminate_pid(pid)
+            PID.write_text(str(winner), encoding="utf-8")
+            print(f"another start won the race; kept pid {winner}, killed {pid}")
+            pid = winner
 
-    # Re-check immediately: if another start raced us, one wins the lock.
-    time.sleep(1.5)
-    winner = running_pid()
-    if winner and winner != pid and pid_alive(pid):
-        _terminate_pid(pid)
-        PID.write_text(str(winner), encoding="utf-8")
-        print(f"another start won the race; kept pid {winner}, killed {pid}")
-        pid = winner
-
-    mode = "termux" if termux else ("windows" if sys.platform == "win32" else "desktop")
-    print(f"loop started (pid {pid}) — {mode} mode")
-    if termux:
-        print("schedule: skipped (dies with the Termux app; the 1s ticker drives it)")
-        print("to run detached on a phone: leave Termux in the background,")
-        print("do not force stop it, and consider: termux-wake-lock")
-    else:
-        installed = schedule.install()
-        print(f"schedule: {'installed' if installed else 'FAILED to install'} ({schedule.describe()})")
-    print(f"live log: {WATCH_LOG}")
-    print(f"crash log: {LOOP_LOG}")
-    return 0
+        mode = "termux" if termux else ("windows" if sys.platform == "win32" else "desktop")
+        print(f"loop started (pid {pid}) — {mode} mode")
+        if termux:
+            print("schedule: skipped (dies with the Termux app; the 1s ticker drives it)")
+            print("to run detached on a phone: leave Termux in the background,")
+            print("do not force stop it, and consider: termux-wake-lock")
+        else:
+            installed = schedule.install()
+            print(f"schedule: {'installed' if installed else 'FAILED to install'} ({schedule.describe()})")
+        print(f"live log: {WATCH_LOG}")
+        print(f"crash log: {LOOP_LOG}")
+        return 0
+    except KeyboardInterrupt:
+        # Ctrl+C must not leave an invisible watcher or a schedule behind.
+        print("\nstart cancelled; stopping the new watcher and removing the schedule.")
+        try:
+            schedule.remove()
+        except Exception:
+            pass
+        if pid:
+            try:
+                _terminate_pid(pid)
+            except Exception:
+                pass
+        try:
+            PID.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 130
 
 
 def ensure() -> int:
@@ -283,15 +310,12 @@ def stop() -> int:
 
 
 def _handle_sigterm(*_a) -> None:
+    # Keep signal handling minimal: no database I/O here, so Ctrl+C is
+    # immediate even while a check is busy. `upcron stop` already sets the
+    # stop flag before it signals the loop.
     from . import watcher
 
     watcher.request_shutdown()
-    try:
-        conn = watcher.db()
-        watcher.request_stop(conn)
-        conn.close()
-    except Exception:
-        pass
     raise SystemExit(0)
 
 

@@ -118,6 +118,21 @@ Key commands:
   restart automatically.
 - `auth` — (re)sign in if the token is missing/invalid.
 
+## Cancelling
+
+- **Ctrl+C** cancels a foreground command (`auth`, `check`, `probe`, `start`,
+  the installer and the uninstaller) without a traceback. The exit code is
+  `130`, and the scripts report `Cancelled.` instead of a failure.
+- Cancelling `start` also stops the watcher it just launched and removes the
+  task, so a half-finished start does not leave anything running.
+- Ctrl+C cancels only the foreground command. It does **not** stop a watcher
+  that is already running in the background — use `upcron stop` for that.
+- Cancelling the uninstaller stops it before it finishes; run it again to
+  complete the uninstall.
+- In an `install.cmd` / `uninstall.cmd` wrapper, Windows may ask
+  `Terminate batch job (Y/N)?` after Ctrl+C. Answer `N` to let the wrapper
+  report the cancellation and exit cleanly.
+
 ## Scheduling and behavior
 
 - The loop runs detached via `pythonw.exe` and uses a 1-second ticker with the

@@ -504,4 +504,8 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     _apply_termux_flag(args)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
