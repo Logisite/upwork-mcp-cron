@@ -193,6 +193,7 @@ uninstall.cmd -PurgeData
 | Symptom | What to try |
 |---|---|
 | `upcron` is not recognized | Open a new terminal (PATH changed); or run `%LOCALAPPDATA%\upwork-cron\upcron.cmd` |
+| Installer says "Python 3.10 or newer was not found" | Run `python --version` (and `py -3 --version`) in the same terminal, then re-run the installer |
 | No toasts | `notify-test`, `doctor --send-test`, check Notifications/Focus Assist |
 | "sign-in needed" or auth errors | `upcron auth` |
 | Loop not running | `status`, `doctor`, `logs -n 50 --loop`, then `start` |

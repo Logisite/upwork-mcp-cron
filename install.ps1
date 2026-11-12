@@ -66,29 +66,38 @@ if (-not $SrcDir -or
 
 Write-Step "Locating Python 3.10+"
 $py = $null
-foreach ($cand in @(@('py','-3'), @('python3'), @('python'))) {
+# Prefer the plain interpreter, then the Windows launcher. Probe output is
+# captured before any filtering: piping a native command into Select-Object
+# -First can leave $LASTEXITCODE empty even when Python ran fine.
+$candidates = @(
+  @('python'),
+  @('py', '-3'),
+  @('python3')
+)
+foreach ($cand in $candidates) {
   try {
     $exe = $cand[0]
     $pyArgs = @()
-    if ($cand.Length -gt 1) { $pyArgs += $cand[1..($cand.Length - 1)] }
-    $ver = (& $exe @pyArgs -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $ver) {
-      $verText = "$ver".Trim()
-      $parts = $verText.Split('.')
-      $maj = [int]$parts[0]
-      $min = [int]$parts[1]
-      if ($maj -eq 3 -and $min -ge 10) {
-        $py = @{ Exe = $exe; Args = $pyArgs; Ver = $verText }
-        break
-      }
+    if ($cand.Length -gt 1) { $pyArgs = @($cand[1..($cand.Length - 1)]) }
+    $probe = & $exe @pyArgs -c "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))" 2>$null
+    if (-not $probe) { continue }
+    $verText = "$(@($probe)[-1])".Trim()
+    if ($verText -notmatch '^\d+\.\d+$') { continue }
+    $parts = $verText.Split('.')
+    $maj = [int]$parts[0]
+    $min = [int]$parts[1]
+    if ($maj -eq 3 -and $min -ge 10) {
+      $py = @{ Exe = $exe; Args = $pyArgs; Ver = $verText }
+      break
     }
   } catch { }
 }
 
 if (-not $py) {
   Write-Host "Python 3.10 or newer was not found." -ForegroundColor Yellow
-  Write-Host "Install it from https://www.python.org/downloads/windows/ and make sure the Python Launcher (py) is installed."
-  Write-Host "Then run this installer again."
+  Write-Host "Tried: python, py -3, python3"
+  Write-Host "Check the same terminal with: python --version   (or: py -3 --version)"
+  Write-Host "Install Python from https://www.python.org/downloads/windows/ if needed, then run this installer again."
   if ($DownloadedSrc) { Remove-Item -Recurse -Force $DownloadedSrc -ErrorAction SilentlyContinue }
   exit 1
 }
