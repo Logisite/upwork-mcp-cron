@@ -228,15 +228,21 @@ data/              Linux/local project data (gitignored); Windows uses %LOCALAPP
 ## Queries
 
 ```python
+# Linux / default
 QUERIES = [
     ("smart_search", {"limit": 10}),                          # profile-matched
     ("search", {"title": "AI", "sort": "recency", "limit": 10}),
 ]
+
+# Windows
+QUERIES = [("smart_search", {"limit": 10})]                  # profile-matched only
 ```
 
-`smart_search` is the higher-recall net and is what caught a post within a
-minute of publishing during testing. Edit `QUERIES` in `watcher.py` to change
-what is watched, then `stop` and `start`.
+`smart_search` is the higher-recall, profile-matched feed and is what caught a
+post within a minute of publishing during testing. On Windows the watcher uses
+`smart_search` only. On other platforms it also runs the keyword `search` query
+above. Edit `QUERIES` in `watcher.py` to change what is watched, then `stop`
+and `start`.
 
 ---
 

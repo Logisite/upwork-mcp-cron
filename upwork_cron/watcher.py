@@ -65,10 +65,16 @@ BACKOFF_BASE_SEC = 30
 BACKOFF_PROBE_SEC = 5.0
 PROBE_TIMEOUT_SEC = 3.0
 
-QUERIES = [
-    ("smart_search", {"limit": 10}),
-    ("search", {"title": "AI", "sort": "recency", "limit": 10}),
-]
+import sys as _sys
+
+if _sys.platform == "win32":
+    # Windows uses Upwork's profile-matched feed only.
+    QUERIES = [("smart_search", {"limit": 10})]
+else:
+    QUERIES = [
+        ("smart_search", {"limit": 10}),
+        ("search", {"title": "AI", "sort": "recency", "limit": 10}),
+    ]
 
 
 def now() -> int:

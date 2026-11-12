@@ -110,17 +110,21 @@ Key commands:
   restarts the loop if needed.
 - Toasts require an interactive user session.
 
-## Changing what is watched
+## What is watched
 
-`QUERIES` are defined in `upwork_cron/watcher.py` inside the installed app
-(`%LOCALAPPDATA%\upwork-cron\app\upwork_cron\watcher.py`). After editing, run:
+On Windows the watcher uses **`smart_search` only** — Upwork's profile-matched
+feed, with no hardcoded keyword/title search. This means results depend on your
+Upwork profile and job preferences.
+
+If you need to change this behavior, edit `QUERIES` in
+`%LOCALAPPDATA%\upwork-cron\app\upwork_cron\watcher.py`, then run:
 
 ```bat
 %LOCALAPPDATA%\upwork-cron\upwork-cron.cmd stop
 %LOCALAPPDATA%\upwork-cron\upwork-cron.cmd start
 ```
 
-(An install/upgrade will overwrite app code; keep custom query edits in mind.)
+(An install/upgrade will overwrite app code; keep custom edits in mind.)
 
 ## Uninstall
 
