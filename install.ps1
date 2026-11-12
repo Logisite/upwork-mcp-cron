@@ -70,15 +70,14 @@ $py = $null
 # captured before any filtering: piping a native command into Select-Object
 # -First can leave $LASTEXITCODE empty even when Python ran fine.
 $candidates = @(
-  @('python'),
-  @('py', '-3'),
-  @('python3')
+  @{ Exe = 'python';  Args = @() },
+  @{ Exe = 'py';      Args = @('-3') },
+  @{ Exe = 'python3'; Args = @() }
 )
 foreach ($cand in $candidates) {
   try {
-    $exe = $cand[0]
-    $pyArgs = @()
-    if ($cand.Length -gt 1) { $pyArgs = @($cand[1..($cand.Length - 1)]) }
+    $exe = $cand.Exe
+    $pyArgs = @($cand.Args)
     $probe = & $exe @pyArgs -c "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))" 2>$null
     if (-not $probe) { continue }
     $verText = "$(@($probe)[-1])".Trim()
