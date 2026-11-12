@@ -1,0 +1,3 @@
+# Keep Windows batch files byte-for-byte with CRLF line endings, including the
+# copies served by GitHub raw for the one-line installers.
+*.cmd -text whitespace=cr-at-eol

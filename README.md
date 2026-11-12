@@ -12,19 +12,41 @@ each one. Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SD
 
 Requirements: Windows 10/11, **Python 3.10+** installed (`py -3`), no admin rights.
 
-From the extracted/cloned project folder, run:
+One-line install (PowerShell):
+
+```powershell
+iwr https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1 -OutFile "$env:TEMP\upcron-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\upcron-install.ps1"
+```
+
+One-line install (CMD):
+
+```bat
+curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
+```
+
+Or, from an extracted/cloned project folder:
 
 ```bat
 install.cmd
 ```
 
-This copies the app to `%LOCALAPPDATA%\upwork-cron`, creates a venv, installs
-dependencies, runs `upwork-cron auth`, installs the per-user `\UpworkCron` Task
-Scheduler job, starts the watcher, and sends a test toast. Re-run to upgrade
-(app code only; data/token/db/logs preserved).
+The installer is per-user: it installs to `%LOCALAPPDATA%\upwork-cron`, creates
+a venv, installs dependencies, runs `upwork-cron auth`, installs the per-user
+`\UpworkCron` Task Scheduler job, starts the watcher, and sends a test toast. It
+also adds `%LOCALAPPDATA%\upwork-cron\bin` to your user PATH, so after opening a
+**new** terminal you can manage everything with the short `upcron` command:
 
-Uninstall: `uninstall.cmd` (add `-PurgeData` to remove token/db/logs). Full
-paths, commands, and troubleshooting: **[README-WINDOWS.md](README-WINDOWS.md)**.
+```bat
+upcron status
+upcron doctor
+upcron logs -n 50
+upcron stop
+upcron start
+```
+
+Re-run the installer to upgrade (app code only; data/token/db/logs preserved).
+Uninstall with `uninstall.cmd` (add `-PurgeData` to remove token/db/logs). Full
+paths, one-liners, and troubleshooting: **[README-WINDOWS.md](README-WINDOWS.md)**.
 
 ---
 

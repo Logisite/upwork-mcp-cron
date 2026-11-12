@@ -20,7 +20,29 @@ user profile.
 
 ## Install
 
-From the folder containing this project (zip extract or repo clone), run:
+The requirements above apply. The installer finds Python but does **not**
+install it.
+
+### Remote install (one line)
+
+PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1 -OutFile "$env:TEMP\upcron-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\upcron-install.ps1"
+```
+
+CMD:
+
+```bat
+curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
+```
+
+The remote installer downloads the current source zip from GitHub, installs it
+per-user, and adds `%LOCALAPPDATA%\upwork-cron\bin` to your **user PATH** so the
+`upcron` command works. Open a **new** terminal after installation for the PATH
+change to take effect.
+
+### From an extracted folder or clone
 
 ```bat
 install.cmd
@@ -29,15 +51,20 @@ install.cmd
 What it does:
 
 1. Checks Windows and finds Python 3.10+ (`py -3` / `python`).
-2. Copies the app to `%LOCALAPPDATA%\upwork-cron\app`.
-3. Creates a virtual environment at `%LOCALAPPDATA%\upwork-cron\venv`.
-4. Installs dependencies (including `windows-toasts`).
-5. Runs `upwork-cron auth` unless a token already exists.
-6. Runs `upwork-cron start` to install the `\UpworkCron` scheduled task and
+2. Downloads the source zip when running the installer remotely, or uses the
+   folder containing `install.cmd`.
+3. Stops any running watcher before replacing code (upgrades).
+4. Copies the app to `%LOCALAPPDATA%\upwork-cron\app`.
+5. Creates a virtual environment at `%LOCALAPPDATA%\upwork-cron\venv`.
+6. Installs dependencies (including `windows-toasts`).
+7. Creates `upcron.cmd` and adds `%LOCALAPPDATA%\upwork-cron\bin` to your user
+   PATH.
+8. Runs `upwork-cron auth` unless a token already exists.
+9. Runs `upwork-cron start` to install the `\UpworkCron` scheduled task and
    start the detached watcher loop (`pythonw.exe`, no console window).
-7. Sends a test toast.
+10. Sends a test toast.
 
-Re-running `install.cmd` upgrades the installed app code while preserving
+Re-running the installer upgrades the installed app code while preserving
 `%LOCALAPPDATA%\upwork-cron\data` (token, database, logs).
 
 ## Installed layout
@@ -46,29 +73,35 @@ Re-running `install.cmd` upgrades the installed app code while preserving
 %LOCALAPPDATA%\upwork-cron\
   app\               installed source (editable install target)
   venv\              Python virtual environment
+  bin\
+    upcron.cmd       PATH command (upcron ...)
+    upwork-cron.cmd  same command, old name
   data\
     token.json       Upwork OAuth tokens
     state.db         jobs, schedule/bucket state, stats
     watch.log        live event log
     loop.log         current-run loop log (truncated on start)
     stderr.log       uncaught stderr for the detached loop
-  upwork-cron.cmd    convenience command wrapper
+  upwork-cron.cmd    convenience command wrapper (full path)
 ```
 
 ## Commands
 
-Use the installed wrapper:
+`upcron` is on your user PATH after installation. If your current terminal was
+open before the install, open a new one (or run the full path
+`%LOCALAPPDATA%\upwork-cron\upcron.cmd`).
 
 ```bat
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd status
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd doctor
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd notify-test
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd logs -n 50
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd logs -n 50 --loop
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd probe
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd auth
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd start
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd stop
+upcron status
+upcron doctor
+upcron notify-test
+upcron logs -n 50
+upcron logs -n 50 --loop
+upcron probe
+upcron check
+upcron auth
+upcron start
+upcron stop
 ```
 
 Key commands:
@@ -120,33 +153,45 @@ If you need to change this behavior, edit `QUERIES` in
 `%LOCALAPPDATA%\upwork-cron\app\upwork_cron\watcher.py`, then run:
 
 ```bat
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd stop
-%LOCALAPPDATA%\upwork-cron\upwork-cron.cmd start
+upcron stop
+upcron start
 ```
 
 (An install/upgrade will overwrite app code; keep custom edits in mind.)
 
 ## Uninstall
 
+From an extracted folder or clone:
+
 ```bat
 uninstall.cmd
 ```
 
-By default this stops/removes the task and app but preserves a backup of your
-data. To remove everything, including token/database/logs:
+Without a local copy (remote install):
+
+```bat
+curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.cmd -o "%TEMP%\upcron-uninstall.cmd" && "%TEMP%\upcron-uninstall.cmd"
+```
+
+By default this stops/removes the task and app, removes `upcron` from PATH, and
+preserves a backup of your data under
+`%LOCALAPPDATA%\upwork-cron-data-backup`. To remove everything, including
+token/database/logs:
 
 ```bat
 uninstall.cmd -PurgeData
 ```
 
-(or run `powershell -ExecutionPolicy Bypass -File uninstall.ps1 -PurgeData`)
+(or run the downloaded copy with `-PurgeData`:
+`powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\upcron-uninstall.ps1" -PurgeData`)
 
 ## Troubleshooting
 
 | Symptom | What to try |
 |---|---|
+| `upcron` is not recognized | Open a new terminal (PATH changed); or run `%LOCALAPPDATA%\upwork-cron\upcron.cmd` |
 | No toasts | `notify-test`, `doctor --send-test`, check Notifications/Focus Assist |
-| "sign-in needed" or auth errors | `upwork-cron.cmd auth` |
+| "sign-in needed" or auth errors | `upcron auth` |
 | Loop not running | `status`, `doctor`, `logs -n 50 --loop`, then `start` |
 | Task not running after reboot | `schtasks /Query /TN UpworkCron /V /FO LIST`, then `doctor` |
 | Want to inspect failures | `doctor`, `logs -n 80`, `logs -n 80 --stderr` |

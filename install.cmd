@@ -1,7 +1,23 @@
 @echo off
 setlocal
 set "SCRIPT_DIR=%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%install.ps1" %*
+set "PS=%SCRIPT_DIR%install.ps1"
+if exist "%PS%" goto run
+
+set "PS=%TEMP%\upcron-install.ps1"
+echo Downloading installer...
+where curl >nul 2>nul
+if errorlevel 1 goto download_ps
+curl -fL "https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1" -o "%PS%"
+if errorlevel 1 goto download_fail
+goto run
+
+:download_ps
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1' -OutFile '%PS%'"
+if errorlevel 1 goto download_fail
+
+:run
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS%" %*
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
   echo.
@@ -9,3 +25,9 @@ if not "%RC%"=="0" (
   pause
 )
 exit /b %RC%
+
+:download_fail
+echo.
+echo Failed to download the installer.
+pause
+exit /b 1
