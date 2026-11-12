@@ -21,7 +21,7 @@ iwr https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1 
 One-line install (CMD):
 
 ```bat
-curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
+curl.exe -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
 ```
 
 Or, from an extracted/cloned project folder:

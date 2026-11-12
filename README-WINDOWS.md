@@ -34,13 +34,16 @@ iwr https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.ps1 
 CMD:
 
 ```bat
-curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
+curl.exe -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.cmd -o "%TEMP%\upcron-install.cmd" && "%TEMP%\upcron-install.cmd"
 ```
 
 The remote installer downloads the current source zip from GitHub, installs it
 per-user, and adds `%LOCALAPPDATA%\upwork-cron\bin` to your **user PATH** so the
 `upcron` command works. Open a **new** terminal after installation for the PATH
 change to take effect.
+
+If your network or organization blocks `Invoke-WebRequest` / `curl.exe`,
+download the repository zip, extract it, and run `install.cmd` from that folder.
 
 ### From an extracted folder or clone
 
@@ -170,7 +173,7 @@ uninstall.cmd
 Without a local copy (remote install):
 
 ```bat
-curl -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.cmd -o "%TEMP%\upcron-uninstall.cmd" && "%TEMP%\upcron-uninstall.cmd"
+curl.exe -fL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.cmd -o "%TEMP%\upcron-uninstall.cmd" && "%TEMP%\upcron-uninstall.cmd"
 ```
 
 By default this stops/removes the task and app, removes `upcron` from PATH, and
