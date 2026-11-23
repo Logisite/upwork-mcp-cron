@@ -21,8 +21,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import auth, dispatch, runner, schedule, watcher
-from .mcp_client import AuthError, NetworkError, probe
+from . import auth, dispatch, keywords, runner, schedule, watcher
+from .mcp_client import AuthError, NetworkError, probe, search as mcp_search
 from .notify import LOG
 from .paths import DATA, DB, LOOP_LOG, STDERR_LOG, TOKEN_PATH, WATCH_LOG, ensure_data_dir
 
@@ -230,6 +230,112 @@ def cmd_exec(a):
     return 0
 
 
+# --- keyword searches (smart_search is always query #1) ---
+
+def cmd_keyword(a):
+    try:
+        return a.kw_fn(a)
+    except keywords.KeywordError as e:
+        print(f"keyword error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_keyword_list(_a):
+    entries = keywords.load()
+    print(f"Smart search: always on (limit {keywords.DEFAULT_LIMIT}, profile-matched)\n")
+    if not entries:
+        print("No keyword searches yet. Add one with:")
+        print('  upcron keyword add "AI"')
+        print('  upcron keyword add "machine learning" --kind title')
+        print('  upcron keyword add "LLM automation" --kind query')
+        return 0
+    print("Keyword searches:")
+    for i, entry in enumerate(entries, 1):
+        print(
+            f"  {i:2}. {entry['text']} "
+            f"[{entry['kind']}] limit {entry['limit']}"
+        )
+    print(f"\n{len(entries)} keyword search(es). smart_search always runs first.")
+    print("Changes take effect on the next check; no restart needed.")
+    return 0
+
+
+def cmd_keyword_add(a):
+    try:
+        added, entry = keywords.add(a.term, kind=a.kind, limit=a.limit)
+    except keywords.KeywordError as e:
+        print(f"keyword add failed: {e}", file=sys.stderr)
+        return 1
+    if added:
+        print(f"added: {entry['text']} [{entry['kind']}] limit {entry['limit']}")
+        print("Runs after smart_search on the next check.")
+    else:
+        print(f"already present: {entry['text']} [{entry['kind']}]")
+    return 0
+
+
+def cmd_keyword_remove(a):
+    try:
+        entry = keywords.remove(a.selector)
+    except keywords.KeywordError as e:
+        print(f"keyword remove failed: {e}", file=sys.stderr)
+        return 1
+    if entry is None:
+        print(f"no such keyword: {a.selector}", file=sys.stderr)
+        return 1
+    print(f"removed: {entry['text']} [{entry['kind']}]")
+    return 0
+
+
+def cmd_keyword_clear(_a):
+    count = keywords.clear()
+    print(f"removed {count} keyword(s); smart_search is still on.")
+    return 0
+
+
+def cmd_keyword_test(a):
+    """Run the keyword search(es) live against Upwork MCP and print results."""
+    tests = []
+    if a.selector:
+        hit = keywords.find(a.selector)
+        if hit:
+            entry = hit[1]
+            tests.append((entry["text"], "search", keywords.params_for(entry)))
+        else:
+            try:
+                entry = keywords.entry_for(a.selector, a.kind, a.limit)
+            except keywords.KeywordError as e:
+                print(f"keyword test failed: {e}", file=sys.stderr)
+                return 1
+            tests.append((entry["text"], "search", keywords.params_for(entry)))
+    else:
+        entries = keywords.load()
+        if entries:
+            tests = [
+                (e["text"], "search", keywords.params_for(e)) for e in entries
+            ]
+        else:
+            tests = [("smart_search", "smart_search", {"limit": keywords.DEFAULT_LIMIT})]
+    rc = 0
+    for label, kind, params in tests:
+        try:
+            rows = mcp_search(kind, params)
+        except (AuthError, NetworkError) as e:
+            print(f"{kind} {label}: auth/network error: {e}", file=sys.stderr)
+            rc = 2
+            continue
+        except Exception as e:
+            print(f"{kind} {label}: failed: {type(e).__name__}: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"\n{kind} {label}: {len(rows)} result(s)")
+        for job in rows[:5]:
+            print(f"  - {(job.get('title') or '(no title)')[:90]}")
+            if job.get("url"):
+                print(f"    {job['url']}")
+    return rc
+
+
 def cmd_check(a):
     """Force one check now, with its own short-lived session."""
     lock = watcher.acquire_lock()
@@ -353,6 +459,10 @@ def cmd_doctor(a):
     print(f"  python          {sys.version.split()[0]} ({sys.executable})")
     print(f"  data dir        {DATA}")
     print(f"  db              {DB} ({'exists' if DB.exists() else 'missing'})")
+    try:
+        print(f"  keywords        {len(keywords.load())} (smart_search always on)")
+    except keywords.KeywordError as e:
+        print(f"  keywords        error: {e}")
     print(f"  token           {'stored' if TOKEN_PATH.exists() else 'missing'} ({TOKEN_PATH})")
     if TOKEN_PATH.exists():
         try:
@@ -409,13 +519,15 @@ def cmd_doctor(a):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="upwork-cron",
-        description="Watch Upwork for new AI jobs and notify on the desktop.",
+        description="Watch Upwork for new jobs matching your profile and keywords.",
         epilog=(
             "examples:\n"
             "  upwork-cron status\n"
             "  upwork-cron metrics\n"
             "  upwork-cron since 60\n"
             "  upwork-cron probe\n"
+            "  upwork-cron keyword add \"machine learning\"\n"
+            "  upwork-cron keyword list\n"
             "  upwork-cron exec search '{\"title\": \"AI\", \"sort\": \"recency\"}'\n"
             "\n"
             "cron keeps the loop alive; status and metrics observe it."
@@ -476,6 +588,62 @@ def main(argv=None):
         send_test=(
             ("--send-test",),
             dict(action="store_true", help="also send a sample notification"),
+        ),
+    )
+
+    # `keyword` has its own subcommands; plain `upcron keyword` lists.
+    kw = sub.add_parser(
+        "keyword",
+        help="Manage keyword searches (smart_search is always on)",
+        description="Manage extra keyword searches. smart_search always runs first.",
+    )
+    kw.add_argument("-t", action="store_true", help="Termux mode for this run")
+    kw.set_defaults(fn=cmd_keyword, kw_fn=cmd_keyword_list)
+    kws = kw.add_subparsers(dest="kw_cmd")
+
+    def kw_add(name, fn, help_text, **kwargs):
+        p = kws.add_parser(name, help=help_text, description=help_text)
+        p.add_argument("-t", action="store_true", help="Termux mode for this run")
+        for arg, opts in kwargs.items():
+            p.add_argument(*opts[0], **opts[1])
+        p.set_defaults(kw_fn=fn)
+        return p
+
+    kw_add("list", cmd_keyword_list, "Show smart_search and your keyword searches")
+    kw_add(
+        "add", cmd_keyword_add, "Add a keyword search",
+        term=(("term",), dict(help="keyword or short phrase (quote spaces)")),
+        kind=(
+            ("--kind",),
+            dict(choices=("title", "query"), default="title",
+                 help="title: match job title (default); query: whole posting"),
+        ),
+        limit=(
+            ("--limit",),
+            dict(type=int, default=keywords.DEFAULT_LIMIT,
+                 help="results per page, 1-10 (default 10)"),
+        ),
+    )
+    kw_add(
+        "remove", cmd_keyword_remove, "Remove a keyword by name or list number",
+        selector=(("selector",), dict(help="keyword text or number from `keyword list`")),
+    )
+    kw_add("clear", cmd_keyword_clear, "Remove all keywords (smart_search stays on)")
+    kw_add(
+        "test", cmd_keyword_test, "Run keyword search(es) live and show results",
+        selector=(
+            ("selector",),
+            dict(nargs="?", help="stored keyword/number to test, or an ad-hoc keyword"),
+        ),
+        kind=(
+            ("--kind",),
+            dict(choices=("title", "query"), default="title",
+                 help="kind for an ad-hoc keyword"),
+        ),
+        limit=(
+            ("--limit",),
+            dict(type=int, default=keywords.DEFAULT_LIMIT,
+                 help="results per page, 1-10 (default 10)"),
         ),
     )
 

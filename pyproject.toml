@@ -1,7 +1,7 @@
 [project]
 name = "upwork-cron"
 version = "0.2.0"
-description = "Poll the Upwork MCP for new AI jobs and send desktop notifications"
+description = "Poll the Upwork MCP for profile-matched and keyword job posts and send desktop notifications"
 requires-python = ">=3.10"
 dependencies = [
     "mcp",

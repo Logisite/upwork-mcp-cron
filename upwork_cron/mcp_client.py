@@ -9,6 +9,7 @@ The SDK's `streamable_http_client` yields a 2-tuple of (read, write) streams;
 pre-built httpx2 client is passed in so we control headers and timeouts.
 """
 
+import asyncio
 import contextlib
 import json
 from pathlib import Path

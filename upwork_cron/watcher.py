@@ -20,7 +20,7 @@ import sqlite3
 import time
 from datetime import datetime
 
-from . import auth, dispatch, lockfile
+from . import auth, dispatch, keywords, lockfile
 from .mcp_client import (
     AuthError,
     NetworkError,
@@ -64,17 +64,6 @@ BACKOFF_BASE_SEC = 30
 # the notify window.
 BACKOFF_PROBE_SEC = 5.0
 PROBE_TIMEOUT_SEC = 3.0
-
-import sys as _sys
-
-if _sys.platform == "win32":
-    # Windows uses Upwork's profile-matched feed only.
-    QUERIES = [("smart_search", {"limit": 10})]
-else:
-    QUERIES = [
-        ("smart_search", {"limit": 10}),
-        ("search", {"title": "AI", "sort": "recency", "limit": 10}),
-    ]
 
 
 def now() -> int:
@@ -278,7 +267,14 @@ async def check_once(conn, sess) -> None:
     total_new = 0
     total_pages = 0
     fresh: list = []
-    for kind, params in QUERIES:
+    # smart_search is always query #1; extra keyword searches come from the
+    # user's `upcron keyword` list in the data dir (no hardcoded keywords).
+    try:
+        queries = keywords.queries()
+    except keywords.KeywordError as e:
+        log(f"keywords unreadable ({e}); running smart_search only")
+        queries = [("smart_search", {"limit": keywords.DEFAULT_LIMIT})]
+    for kind, params in queries:
         new, pages, stop = await page_query(sess, kind, params, conn)
         total_new += len(new)
         total_pages += pages
@@ -288,7 +284,7 @@ async def check_once(conn, sess) -> None:
             except Exception:
                 pub_ts = now()
             fresh.append((j, pub_ts))
-        log(f"query {kind}: {pages} page(s), {len(new)} new, stop={stop}")
+        log(f"query {kind} {params}: {pages} page(s), {len(new)} new, stop={stop}")
     # de-dup across queries by id (same job can appear in both feeds)
     seen_ids = set()
     unique = []

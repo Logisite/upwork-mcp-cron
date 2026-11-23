@@ -1,7 +1,8 @@
 # upwork-cron
 
-Watches the Upwork MCP server for new AI job posts and fires notifications for
-each one. Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SDK.
+Watches Upwork for new jobs matching your profile (`smart_search`) and any
+keywords you add. Built on the official
+[`mcp`](https://pypi.org/project/mcp/) Python SDK.
 
 - **Linux / Plasma / Termux:** clickable desktop notifications via
   `notify-send`, or Android notifications via Termux (see below).
@@ -107,11 +108,12 @@ After installation, use `upcron`:
 upcron status          # loop state, bucket remaining, jobs stored
 upcron since 60        # stored jobs from the last 60 min (local SQL)
 upcron metrics         # observed notify latency vs the 2 min target
-upcron probe           # one live MCP search, bypassing storage
+upcron probe           # one live MCP smart_search, bypassing storage
 upcron check           # force a check now
 upcron logs -n 50      # what it has been doing
 upcron auth            # (re)sign in via browser
 upcron start|stop      # background loop + cron schedule
+upcron keyword ...     # manage extra keyword searches (see Queries)
 ```
 
 From a source checkout, prefix with `uv run` (for example
@@ -293,6 +295,7 @@ upwork_cron/
   runner.py        start/stop/ensure, detached loop, graceful stop
   paths.py         platform-aware data/log paths
   lockfile.py      cross-platform loop lock
+  keywords.py      per-user keyword list + smart_search query builder
 run.sh             cron self-heal entrypoint (Linux)
 install.sh         per-user Linux installer
 uninstall.sh       per-user Linux uninstaller
@@ -306,22 +309,30 @@ data/              local project data (gitignored); installed copies use
 
 ## Queries
 
-```python
-# Linux / default
-QUERIES = [
-    ("smart_search", {"limit": 10}),                          # profile-matched
-    ("search", {"title": "AI", "sort": "recency", "limit": 10}),
-]
+`smart_search` (Upwork's profile-matched feed) **always runs first**, on every
+platform. Nothing is hardcoded beyond that: every other search comes from the
+keywords you add, stored per-user in `keywords.json` inside the data directory.
+Changes take effect on the next check — no restart needed.
 
-# Windows
-QUERIES = [("smart_search", {"limit": 10})]                  # profile-matched only
+```sh
+upcron keyword add "machine learning"        # match the job title (default)
+upcron keyword add "LLM automation" --kind query   # match the whole posting
+upcron keyword add "Python developer" --limit 5
+upcron keyword list                          # smart_search + your keywords
+upcron keyword remove "machine learning"     # or use the number from `list`
+upcron keyword clear                         # remove all keywords
+upcron keyword test "machine learning"       # live search, print results
 ```
 
-`smart_search` is the higher-recall, profile-matched feed and is what caught a
-post within a minute of publishing during testing. On Windows the watcher uses
-`smart_search` only. On other platforms it also runs the keyword `search` query
-above. Edit `QUERIES` in `watcher.py` to change what is watched, then `stop`
-and `start`.
+`--kind title` matches whole, stemmed words in the job title (1–3 words work
+best; terms are ANDed). `--kind query` matches across title and description
+with semantic expansion. `--limit` is 1–10 per page. Up to 20 keywords are
+kept; duplicates are ignored.
+
+`upcron keyword test` with no argument runs all saved keyword searches live
+(or just `smart_search` when none are saved), so you can verify what a keyword
+returns before relying on it. The watcher de-duplicates jobs across searches
+by id, so overlapping keywords do not produce duplicate notifications.
 
 ---
 
@@ -337,7 +348,7 @@ and `start`.
 | `upcron: command not found` | Open a new terminal (PATH changed), or run `~/.local/bin/upcron` |
 | Installer says Python 3.10+ was not found | Run `python3 --version`; install Python 3.10+ and re-run the installer |
 | Installer says `crontab` was not found | Install cron (Debian/Ubuntu: `sudo apt install cron`), then `upcron stop && upcron start` |
-| Change search | edit `QUERIES` in `watcher.py` (source or installed `app/` copy), then `upcron stop` + `upcron start` |
+| Change search | `upcron keyword add/list/remove/clear`; smart_search is always on |
 
 ## Exit codes
 

@@ -163,19 +163,21 @@ Key commands:
 
 ## What is watched
 
-On Windows the watcher uses **`smart_search` only** — Upwork's profile-matched
-feed, with no hardcoded keyword/title search. This means results depend on your
-Upwork profile and job preferences.
-
-If you need to change this behavior, edit `QUERIES` in
-`%LOCALAPPDATA%\upwork-cron\app\upwork_cron\watcher.py`, then run:
+`smart_search` (Upwork's profile-matched feed) **always runs first**, on Windows
+and Linux alike. It is not hardcoded beyond that: any extra keyword searches
+come from the keywords you add, stored per-user in
+`%LOCALAPPDATA%\upwork-cron\data\keywords.json`. They survive upgrades.
 
 ```bat
-upcron stop
-upcron start
+upcron keyword add "machine learning"
+upcron keyword add "LLM automation" --kind query
+upcron keyword list
+upcron keyword remove "machine learning"
+upcron keyword test "machine learning"
 ```
 
-(An install/upgrade will overwrite app code; keep custom edits in mind.)
+Changes apply on the next check — no need to edit `watcher.py` or restart.
+Run `upcron keyword` for all options, or see the main README.
 
 ## Uninstall
 
