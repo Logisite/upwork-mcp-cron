@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import auth, dispatch, keywords, runner, schedule, watcher
+from . import auth, dispatch, keywords, runner, schedule, updater, watcher
 from .mcp_client import AuthError, NetworkError, probe, search as mcp_search
 from .notify import LOG
 from .paths import DATA, DB, LOOP_LOG, STDERR_LOG, TOKEN_PATH, WATCH_LOG, ensure_data_dir
@@ -228,6 +228,12 @@ def cmd_exec(a):
         return 1
     print(json.dumps(rows, indent=2))
     return 0
+
+
+# --- self-update ---
+
+def cmd_update(a):
+    return updater.update(ref=a.ref, check_only=a.check)
 
 
 # --- keyword searches (smart_search is always query #1) ---
@@ -528,6 +534,8 @@ def main(argv=None):
             "  upwork-cron probe\n"
             "  upwork-cron keyword add \"machine learning\"\n"
             "  upwork-cron keyword list\n"
+            "  upwork-cron update --check\n"
+            "  upwork-cron update\n"
             "  upwork-cron exec search '{\"title\": \"AI\", \"sort\": \"recency\"}'\n"
             "\n"
             "cron keeps the loop alive; status and metrics observe it."
@@ -580,6 +588,11 @@ def main(argv=None):
         ),
     )
     add("loop", lambda _a: runner.loop(), "Internal: the 1s bucket ticker")
+    add("update", cmd_update, "Update to the latest version (keeps keywords/data)",
+        ref=(("--ref",), dict(default=updater.DEFAULT_REF,
+                              help="branch, tag or commit (default: main)")),
+        check=(("--check",), dict(action="store_true",
+                                  help="only report whether an update is available")))
     add("notify-test", cmd_notify_test, "Send a sample notification to verify delivery")
     add(
         "doctor",

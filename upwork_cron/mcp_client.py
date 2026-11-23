@@ -28,7 +28,7 @@ MCP_URL = "https://mcp.upwork.com/mcp"
 ORG_UID = "2028571967613634984"
 
 DEFAULT_HEADERS = {
-    "User-Agent": "upwork-cron/0.2.0 (python-mcp-sdk)",
+    "User-Agent": "upwork-cron/0.2.1 (python-mcp-sdk)",
     "Accept": "application/json, text/event-stream",
 }
 

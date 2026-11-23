@@ -17,8 +17,11 @@ Requirements: desktop Linux (X11 or Wayland), **Python 3.10+**, `cron`, and
 One-line install:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.sh -o /tmp/upcron-install.sh && bash /tmp/upcron-install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.sh)
 ```
+
+The `bash <(...)` form is a single command and leaves stdin free for the
+browser sign-in fallback. It needs bash or zsh (not plain `sh`).
 
 Or, from a clone or extracted folder:
 
@@ -44,13 +47,27 @@ upcron start
 
 Options: `--skip-auth`, `--skip-start`, `--ref <branch/tag/commit>`.
 
-Re-run the installer to upgrade: app code and dependencies are refreshed while
-`~/.local/share/upwork-cron/data` (token, database, logs) is preserved.
+After installation, upgrade in place with `upcron update` (see Updates below).
+Re-running the installer also works: app code and dependencies are refreshed
+while `~/.local/share/upwork-cron/data` (token, database, logs, keywords) is
+preserved.
+
+Updates:
+
+```sh
+upcron update --check   # report whether a newer version is available
+upcron update           # fetch, install, and restart if the watcher was running
+upcron update --ref main   # explicit branch/tag/commit (default: main)
+```
+
+`update` keeps `keywords.json`, the token, the database and logs. It stops the
+watcher for the swap and restarts it afterwards if it was running or scheduled.
+Ctrl+C cancels cleanly and restores the previous app.
 
 Uninstall:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.sh -o /tmp/upcron-uninstall.sh && bash /tmp/upcron-uninstall.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.sh)
 ```
 
 Or `./uninstall.sh` from the clone. Data is copied to
@@ -114,6 +131,7 @@ upcron logs -n 50      # what it has been doing
 upcron auth            # (re)sign in via browser
 upcron start|stop      # background loop + cron schedule
 upcron keyword ...     # manage extra keyword searches (see Queries)
+upcron update          # update in place (see Updates)
 ```
 
 From a source checkout, prefix with `uv run` (for example
@@ -296,6 +314,7 @@ upwork_cron/
   paths.py         platform-aware data/log paths
   lockfile.py      cross-platform loop lock
   keywords.py      per-user keyword list + smart_search query builder
+  updater.py       in-place self-update from GitHub
 run.sh             cron self-heal entrypoint (Linux)
 install.sh         per-user Linux installer
 uninstall.sh       per-user Linux uninstaller

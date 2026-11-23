@@ -92,7 +92,7 @@ Re-running the installer upgrades the installed app code while preserving
 
 `upcron` is on your user PATH after installation. If your current terminal was
 open before the install, open a new one (or run the full path
-`%LOCALAPPDATA%\upwork-cron\upcron.cmd`).
+`%LOCALAPPDATA%\upwork-cron\bin\upcron.cmd`).
 
 ```bat
 upcron status
@@ -105,6 +105,8 @@ upcron check
 upcron auth
 upcron start
 upcron stop
+upcron update --check
+upcron update
 ```
 
 Key commands:
@@ -117,6 +119,10 @@ Key commands:
 - `stop` — **real stop**: removes the task and stops the loop so it will not
   restart automatically.
 - `auth` — (re)sign in if the token is missing/invalid.
+- `update` — fetch the latest release, reinstall dependencies and restart the
+  watcher if it was running. Keeps `%LOCALAPPDATA%\upwork-cron\data` (token,
+  database, logs, keywords). `--check` only reports if an update is available;
+  `--ref` selects a branch/tag/commit.
 
 ## Cancelling
 
