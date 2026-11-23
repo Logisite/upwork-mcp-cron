@@ -63,4 +63,4 @@ def notify(
         if not ok:
             log(f"windows notify not delivered: {summary[:60]}")
         return
-    notify_desktop(summary, body, urgency=urgency, sticky=sticky)
+    notify_desktop(summary, body, urgency=urgency, sticky=sticky, url=url)

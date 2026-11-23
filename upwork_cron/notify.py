@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -10,11 +11,49 @@ from pathlib import Path
 
 from .paths import LOG, LOOP_LOG, ensure_data_dir
 
-NOTIFY_SEND = "/usr/bin/notify-send"
+NOTIFY_SEND = shutil.which("notify-send") or "/usr/bin/notify-send"
 LOG_MAX = 1_000_000      # rotate a file once it passes this
 LOG_KEEP = 5             # how many rotated generations to retain
 
 _ENV_CACHE: dict = {}
+_ACTION_SUPPORT = None
+
+# Run notify-send in a detached helper: it waits for the action because -A
+# implies --wait, then opens the job URL. Doing this in a child rather than a
+# thread means a click still works after `upcron notify-test` (or any other
+# one-shot command) has already exited. The subshell is backgrounded so the
+# short-lived parent can be reaped immediately and the long wait is reparented
+# to init instead of lingering as a zombie under the watcher.
+_ACTION_SCRIPT = '''
+(
+  out=$("$@")
+  if [ "$out" = "default" ]; then
+    if command -v xdg-open >/dev/null 2>&1; then
+      exec xdg-open "$UPCRON_URL" >/dev/null 2>&1
+    elif command -v gio >/dev/null 2>&1; then
+      exec gio open "$UPCRON_URL" >/dev/null 2>&1
+    fi
+  fi
+  exit 0
+) >/dev/null 2>&1 &
+'''
+
+
+def _supports_actions() -> bool:
+    global _ACTION_SUPPORT
+    if _ACTION_SUPPORT is None:
+        try:
+            out = subprocess.run(
+                [NOTIFY_SEND, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            text = (out.stdout or "") + (out.stderr or "")
+            _ACTION_SUPPORT = "--action" in text
+        except Exception:
+            _ACTION_SUPPORT = False
+    return _ACTION_SUPPORT
 
 
 def _rotate(path: Path) -> None:
@@ -89,8 +128,20 @@ def session_env() -> dict:
     return env
 
 
-def notify(summary: str, body: str = "", urgency: str = "normal", sticky: bool = False) -> None:
-    """Fire a desktop notification via notify-send (Linux/Plasma)."""
+def notify(
+    summary: str,
+    body: str = "",
+    urgency: str = "normal",
+    sticky: bool = False,
+    url: str = "",
+) -> None:
+    """Fire a desktop notification via notify-send (Linux/Plasma).
+
+    When a URL is given and the installed notify-send supports actions, the
+    notification is clickable: choosing "Open job" (or clicking the body)
+    opens it in the browser. The waiting is done by a detached helper so it
+    survives the caller exiting.
+    """
     if sys.platform == "win32":
         # Windows dispatch is handled by notify_windows; this is a fallback.
         log(f"notify-send unavailable on Windows: {summary[:80]}")
@@ -100,10 +151,28 @@ def notify(summary: str, body: str = "", urgency: str = "normal", sticky: bool =
         cmd += ["-t", "0"]
     else:
         cmd += ["-t", "15000"]
+    clickable = bool(url) and _supports_actions()
+    if clickable:
+        cmd += ["-A", "default=Open job"]
     cmd.append(summary)
     if body:
         cmd.append(body)
     try:
-        subprocess.run(cmd, env=session_env(), timeout=10, check=False)
+        if clickable:
+            env = dict(session_env())
+            env["UPCRON_URL"] = url
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", _ACTION_SCRIPT, "sh", *cmd],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            subprocess.run(cmd, env=session_env(), timeout=10, check=False)
     except Exception as e:
         log(f"notify failed: {e}")

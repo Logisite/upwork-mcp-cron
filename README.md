@@ -3,10 +3,59 @@
 Watches the Upwork MCP server for new AI job posts and fires notifications for
 each one. Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SDK.
 
-- **Linux / Plasma / Termux:** desktop notifications via `notify-send` or Termux
-  (see below).
+- **Linux / Plasma / Termux:** clickable desktop notifications via
+  `notify-send`, or Android notifications via Termux (see below).
 - **Windows 10/11 (per-user):** Windows toast notifications with Task Scheduler
   keepalive. See **[README-WINDOWS.md](README-WINDOWS.md)** for details.
+
+## Linux installation
+
+Requirements: desktop Linux (X11 or Wayland), **Python 3.10+**, `cron`, and
+`notify-send` (libnotify). No root access is needed.
+
+One-line install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/install.sh -o /tmp/upcron-install.sh && bash /tmp/upcron-install.sh
+```
+
+Or, from a clone or extracted folder:
+
+```sh
+./install.sh
+```
+
+The installer is per-user. It installs to `~/.local/share/upwork-cron`
+(`app/`, `venv/`, `data/`), creates `~/.local/bin/upcron` and
+`~/.local/bin/upwork-cron`, adds `~/.local/bin` to your PATH through
+`~/.profile` if needed, runs browser sign-in, starts the watcher, installs the
+user crontab self-heal line, and sends a test notification.
+
+After installation (open a new terminal if PATH was just changed):
+
+```sh
+upcron status
+upcron doctor
+upcron logs -n 50
+upcron stop
+upcron start
+```
+
+Options: `--skip-auth`, `--skip-start`, `--ref <branch/tag/commit>`.
+
+Re-run the installer to upgrade: app code and dependencies are refreshed while
+`~/.local/share/upwork-cron/data` (token, database, logs) is preserved.
+
+Uninstall:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Logisite/upwork-mcp-cron/main/uninstall.sh -o /tmp/upcron-uninstall.sh && bash /tmp/upcron-uninstall.sh
+```
+
+Or `./uninstall.sh` from the clone. Data is copied to
+`~/.local/share/upwork-cron-data-backup`; add `--purge-data` to remove
+everything. Ctrl+C cancels the installer or uninstaller cleanly; re-run it
+when ready.
 
 ## Windows installation
 
@@ -52,18 +101,21 @@ paths, one-liners, and troubleshooting: **[README-WINDOWS.md](README-WINDOWS.md)
 
 ## Commands
 
-```sh
-cd ~/projects/efficiency/upwork-cron
+After installation, use `upcron`:
 
-uv run upwork-cron status          # loop state, bucket remaining, jobs stored
-uv run upwork-cron since 60        # stored jobs from the last 60 min (local SQL)
-uv run upwork-cron metrics         # observed notify latency vs the 2 min target
-uv run upwork-cron probe           # one live MCP search, bypassing storage
-uv run upwork-cron check           # force a check now
-uv run upwork-cron logs -n 50      # what it has been doing
-uv run upwork-cron auth            # (re)sign in via browser
-uv run upwork-cron start|stop      # background loop + cron schedule
+```sh
+upcron status          # loop state, bucket remaining, jobs stored
+upcron since 60        # stored jobs from the last 60 min (local SQL)
+upcron metrics         # observed notify latency vs the 2 min target
+upcron probe           # one live MCP search, bypassing storage
+upcron check           # force a check now
+upcron logs -n 50      # what it has been doing
+upcron auth            # (re)sign in via browser
+upcron start|stop      # background loop + cron schedule
 ```
+
+From a source checkout, prefix with `uv run` (for example
+`uv run upwork-cron status`).
 
 Every command has `--help`. Useful cross-platform diagnostics: `notify-test`,
 `doctor` (`--send-test`), and `logs --loop` / `logs --stderr`.
@@ -204,12 +256,13 @@ exponentially from 30s to 30 min; a successful check resets it immediately.
 
 ## Notifications
 
-- **Linux (Plasma):** sent via `notify-send`; the desktop env is read from the
-  live Plasma session so it survives reboots and display renumbering.
+- **Linux (Plasma):** sent via `notify-send`; click the notification body (on
+  Plasma) or its **Open job** action to open the job in your browser.
 - **Windows:** sent as Windows toasts (`windows-toasts`); clicking opens the job.
   Use `notify-test` / `doctor --send-test` and check notification settings/Focus
   Assist if nothing appears.
-- **Termux:** Android notifications via Termux:API (`-t` / `tsetup`).
+- **Termux:** Android notifications via Termux:API (`-t` / `tsetup`); tapping
+  opens the job URL.
 
 ```
 Summary:  12m ago · 20 to 50 proposals
@@ -241,10 +294,14 @@ upwork_cron/
   paths.py         platform-aware data/log paths
   lockfile.py      cross-platform loop lock
 run.sh             cron self-heal entrypoint (Linux)
+install.sh         per-user Linux installer
+uninstall.sh       per-user Linux uninstaller
 install.cmd/.ps1   per-user Windows installer
 uninstall.cmd/.ps1 per-user Windows uninstaller
 README-WINDOWS.md  Windows-specific instructions
-data/              Linux/local project data (gitignored); Windows uses %LOCALAPPDATA%\upwork-cron\data
+data/              local project data (gitignored); installed copies use
+                   ~/.local/share/upwork-cron/data (Linux) or
+                   %LOCALAPPDATA%\upwork-cron\data (Windows)
 ```
 
 ## Queries
@@ -272,12 +329,15 @@ and `start`.
 
 | Symptom | Fix |
 |---|---|
-| No notifications | `status`: is the loop `running`? Is `token: stored`? Is `bucket` draining? |
-| "sign-in needed" | `uv run upwork-cron auth` |
-| Bucket frozen | loop died; `start` to force |
+| No notifications | `upcron status`: is the loop `running`? Is `token: stored`? Is `bucket` draining? Also run `upcron notify-test`; on Linux install `notify-send`/libnotify if missing. |
+| "sign-in needed" | `upcron auth` |
+| Bucket frozen | loop died; `upcron start` to force |
 | `ordering guard tripped` in logs | Upwork returned unordered pages; paging stopped early, worth a look |
-| Want it fully off | `uv run upwork-cron stop` |
-| Change search | edit `QUERIES` in `watcher.py`, then `stop` + `start` |
+| Want it fully off | `upcron stop` |
+| `upcron: command not found` | Open a new terminal (PATH changed), or run `~/.local/bin/upcron` |
+| Installer says Python 3.10+ was not found | Run `python3 --version`; install Python 3.10+ and re-run the installer |
+| Installer says `crontab` was not found | Install cron (Debian/Ubuntu: `sudo apt install cron`), then `upcron stop && upcron start` |
+| Change search | edit `QUERIES` in `watcher.py` (source or installed `app/` copy), then `upcron stop` + `upcron start` |
 
 ## Exit codes
 

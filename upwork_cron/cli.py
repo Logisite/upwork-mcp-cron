@@ -341,6 +341,8 @@ def cmd_notify_test(_a):
     print(f"test notification sent via {dispatch.backend_name()} backend")
     if sys.platform == "win32":
         print("if nothing appeared: check Windows notification settings and Focus Assist")
+    else:
+        print("click Open job on the notification to open the Upwork jobs page")
     return 0
 
 

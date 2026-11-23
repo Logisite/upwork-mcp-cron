@@ -129,6 +129,9 @@ function Invoke-Py([string[]]$arguments) {
 
 Write-Step "Creating install directories"
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DataDir, $BinDir | Out-Null
+# `python -m` puts the current directory first on sys.path. Run from TEMP so a
+# source checkout cannot shadow the installed app during auth/start.
+if ($env:TEMP -and (Test-Path $env:TEMP)) { Set-Location $env:TEMP }
 
 Write-Step "Stopping any running watcher"
 $ExistingVpy = Join-Path $VenvDir 'Scripts\python.exe'
@@ -165,6 +168,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'Dependency installation failed.' }
 Write-Step "Creating the upcron command"
 $shim = @(
   '@echo off',
+  'cd /d "%LOCALAPPDATA%\upwork-cron" || exit /b 1',
   '"%LOCALAPPDATA%\upwork-cron\venv\Scripts\python.exe" -m upwork_cron %*'
 )
 foreach ($name in @('upcron.cmd', 'upwork-cron.cmd')) {

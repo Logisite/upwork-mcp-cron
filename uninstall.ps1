@@ -12,6 +12,11 @@ $Vpy = Join-Path $InstallRoot 'venv\Scripts\python.exe'
 $DataDir = Join-Path $InstallRoot 'data'
 $BinDir = Join-Path $InstallRoot 'bin'
 
+# `python -m` imports from the current directory first. Run from TEMP so a
+# source checkout cannot shadow the installed app, and so the install root can
+# be deleted at the end of the uninstall.
+if ($env:TEMP -and (Test-Path $env:TEMP)) { Set-Location $env:TEMP }
+
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Stop-Cancelled {
   Write-Host "`nUninstall cancelled." -ForegroundColor Yellow

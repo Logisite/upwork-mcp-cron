@@ -1,3 +1,5 @@
 # Keep Windows batch files byte-for-byte with CRLF line endings, including the
 # copies served by GitHub raw for the one-line installers.
 *.cmd -text whitespace=cr-at-eol
+# Shell installers must stay LF so they run on Linux/macOS checkouts.
+*.sh text eol=lf

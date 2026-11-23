@@ -7,6 +7,7 @@ Windows: per-user Task Scheduler task running `pythonw -m upwork_cron ensure`.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from .notify import log
 from .paths import ROOT
 
 TASK_NAME = "UpworkCron"
-CRON_LINE = f"* * * * * {ROOT / 'run.sh'}"
+CRON_LINE = f"* * * * * {shlex.quote(str(ROOT / 'run.sh'))}"
 
 
 def _pythonw() -> str:
