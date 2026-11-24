@@ -132,6 +132,7 @@ upcron auth            # (re)sign in via browser
 upcron start|stop      # background loop + cron schedule
 upcron keyword ...     # manage extra keyword searches (see Queries)
 upcron update          # update in place (see Updates)
+upcron portfolio ...   # build a portfolio from job listings (see Portfolio)
 ```
 
 From a source checkout, prefix with `uv run` (for example
@@ -315,6 +316,7 @@ upwork_cron/
   lockfile.py      cross-platform loop lock
   keywords.py      per-user keyword list + smart_search query builder
   updater.py       in-place self-update from GitHub
+  portfolio.py     job-listing portfolio: fetch + generate
 run.sh             cron self-heal entrypoint (Linux)
 install.sh         per-user Linux installer
 uninstall.sh       per-user Linux uninstaller
@@ -352,6 +354,31 @@ kept; duplicates are ignored.
 (or just `smart_search` when none are saved), so you can verify what a keyword
 returns before relying on it. The watcher de-duplicates jobs across searches
 by id, so overlapping keywords do not produce duplicate notifications.
+
+## Portfolio
+
+Build a portfolio from job listings. Items are stored per-user in
+`portfolio.json` inside the data directory and survive upgrades.
+
+```sh
+upcron portfolio add "My project" --url https://example.com --pay "$40/hr"
+upcron portfolio list
+upcron portfolio fetch               # import latest listings from the local DB
+upcron portfolio fetch --live        # fetch live from Upwork MCP
+upcron portfolio build --live --format html -o ~/portfolio.html
+upcron portfolio generate            # re-render from stored items
+upcron portfolio remove 1
+upcron portfolio clear
+```
+
+`fetch` imports the latest listings the watcher has already stored (no network
+calls). Add `--live` to query Upwork directly using `smart_search` plus any
+keywords you configured; `--smart-only` uses just `smart_search`. `--limit`
+caps results per query and `--since` limits the local fetch to jobs seen in the
+last N minutes. Duplicates are skipped by job id, URL, or title.
+
+`build` fetches and then generates in one step. `generate` defaults to
+`<data>/portfolio.md`; use `--format html` for a standalone page.
 
 ---
 

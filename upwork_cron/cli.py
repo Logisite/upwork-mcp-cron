@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import auth, dispatch, keywords, runner, schedule, updater, watcher
+from . import auth, dispatch, keywords, portfolio, runner, schedule, updater, watcher
 from .mcp_client import AuthError, NetworkError, probe, search as mcp_search
 from .notify import LOG
 from .paths import DATA, DB, LOOP_LOG, STDERR_LOG, TOKEN_PATH, WATCH_LOG, ensure_data_dir
@@ -522,6 +522,89 @@ def cmd_doctor(a):
     return 0
 
 
+# --- portfolio ---
+
+def cmd_portfolio(a):
+    try:
+        return a.pf_fn(a)
+    except portfolio.PortfolioError as e:
+        print(f"portfolio error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_portfolio_list(_a):
+    items = portfolio.load()
+    if not items:
+        print("Portfolio is empty. Add an item or run `upcron portfolio fetch`.")
+        return 0
+    print(f"Portfolio ({len(items)} item(s)):\n")
+    for i, item in enumerate(items, 1):
+        print(f"  {i:2}. {item['title']}")
+        if item["pay"]:
+            print(f"      {item['pay']}")
+        if item["url"]:
+            print(f"      {item['url']}")
+    return 0
+
+
+def cmd_portfolio_add(a):
+    added = portfolio.add(
+        a.title, url=a.url or "", description=a.description or "",
+        pay=a.pay or "", source=a.source or "manual",
+    )
+    print("added" if added else "already present (skipped)")
+    return 0
+
+
+def cmd_portfolio_remove(a):
+    item = portfolio.remove(a.selector)
+    if item is None:
+        print(f"no such portfolio item: {a.selector}", file=sys.stderr)
+        return 1
+    print(f"removed: {item['title']}")
+    return 0
+
+
+def cmd_portfolio_clear(_a):
+    count = portfolio.clear()
+    print(f"removed {count} portfolio item(s)")
+    return 0
+
+
+def _fetch_portfolio(a) -> int:
+    if a.live:
+        print("Fetching latest listings from Upwork MCP ...")
+        try:
+            added = portfolio.fetch_live(limit=a.limit, use_keywords=not a.smart_only)
+        except (AuthError, NetworkError) as e:
+            print(f"fetch failed: {e}", file=sys.stderr)
+            return 2
+        except Exception as e:
+            print(f"fetch failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+    else:
+        added = portfolio.fetch_stored(since_minutes=a.since, limit=a.limit)
+    print(f"added {added} new item(s); {len(portfolio.load())} total")
+    return 0
+
+
+def cmd_portfolio_fetch(a):
+    return _fetch_portfolio(a)
+
+
+def cmd_portfolio_generate(a):
+    path = portfolio.generate(a.output, a.format)
+    print(f"wrote {path} ({len(portfolio.load())} item(s))")
+    return 0
+
+
+def cmd_portfolio_build(a):
+    rc = _fetch_portfolio(a)
+    if rc:
+        return rc
+    return cmd_portfolio_generate(a)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="upwork-cron",
@@ -536,6 +619,7 @@ def main(argv=None):
             "  upwork-cron keyword list\n"
             "  upwork-cron update --check\n"
             "  upwork-cron update\n"
+            "  upwork-cron portfolio build --live\n"
             "  upwork-cron exec search '{\"title\": \"AI\", \"sort\": \"recency\"}'\n"
             "\n"
             "cron keeps the loop alive; status and metrics observe it."
@@ -602,6 +686,66 @@ def main(argv=None):
             ("--send-test",),
             dict(action="store_true", help="also send a sample notification"),
         ),
+    )
+
+    # Portfolio: manual items, listing fetch, document generation.
+    pf = sub.add_parser(
+        "portfolio",
+        help="Build a portfolio from job listings",
+        description="Manage portfolio items, fetch job listings, generate a document.",
+    )
+    pf.add_argument("-t", action="store_true", help="Termux mode for this run")
+    pf.set_defaults(fn=cmd_portfolio, pf_fn=cmd_portfolio_list)
+    pfs = pf.add_subparsers(dest="pf_cmd")
+
+    def pf_add(name, fn, help_text, **kwargs):
+        p = pfs.add_parser(name, help=help_text, description=help_text)
+        p.add_argument("-t", action="store_true", help="Termux mode for this run")
+        for arg, opts in kwargs.items():
+            p.add_argument(*opts[0], **opts[1])
+        p.set_defaults(pf_fn=fn)
+        return p
+
+    pf_add("list", cmd_portfolio_list, "Show portfolio items")
+    pf_add(
+        "add", cmd_portfolio_add, "Add a portfolio item manually",
+        title=(("title",), dict(help="item title")),
+        url=(("--url",), dict(default="", help="listing or project URL")),
+        description=(("--description",), dict(default="", help="short description")),
+        pay=(("--pay",), dict(default="", help="budget or rate text")),
+        source=(("--source",), dict(default="manual", help="where it came from")),
+    )
+    pf_add(
+        "remove", cmd_portfolio_remove,
+        "Remove an item by list number or title",
+        selector=(("selector",), dict(help="number from `portfolio list` or title")),
+    )
+    pf_add("clear", cmd_portfolio_clear, "Remove all portfolio items")
+    for name, fn, help_text in (
+        ("fetch", cmd_portfolio_fetch, "Fetch latest job listings into the portfolio"),
+        ("build", cmd_portfolio_build, "Fetch listings then generate the document"),
+    ):
+        pf_add(
+            name, fn, help_text,
+            live=(("--live",), dict(action="store_true",
+                                    help="fetch live from Upwork MCP (default: local DB)")),
+            smart_only=(("--smart-only",), dict(action="store_true",
+                                                help="with --live, use only smart_search")),
+            limit=(("--limit",), dict(type=int, default=10,
+                                      help="max listings per query (default 10)")),
+            since=(("--since",), dict(type=int, default=0,
+                                      help="local DB: only jobs seen in last N minutes")),
+            output=(("-o", "--output"), dict(default=None,
+                                             help="output file (default: <data>/portfolio.md)")),
+            format=(("--format",), dict(choices=("md", "html"), default="md",
+                                        help="output format (default: md)")),
+        )
+    pf_add(
+        "generate", cmd_portfolio_generate, "Generate the portfolio document",
+        output=(("-o", "--output"), dict(default=None,
+                                         help="output file (default: <data>/portfolio.md)")),
+        format=(("--format",), dict(choices=("md", "html"), default="md",
+                                    help="output format (default: md)")),
     )
 
     # `keyword` has its own subcommands; plain `upcron keyword` lists.

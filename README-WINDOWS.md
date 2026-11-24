@@ -107,6 +107,7 @@ upcron start
 upcron stop
 upcron update --check
 upcron update
+upcron portfolio build --live
 ```
 
 Key commands:
