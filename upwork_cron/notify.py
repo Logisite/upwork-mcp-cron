@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -18,24 +19,48 @@ LOG_KEEP = 5             # how many rotated generations to retain
 _ENV_CACHE: dict = {}
 _ACTION_SUPPORT = None
 
-# Run notify-send in a detached helper: it waits for the action because -A
-# implies --wait, then opens the job URL. Doing this in a child rather than a
-# thread means a click still works after `upcron notify-test` (or any other
-# one-shot command) has already exited. The subshell is backgrounded so the
-# short-lived parent can be reaped immediately and the long wait is reparented
-# to init instead of lingering as a zombie under the watcher.
-_ACTION_SCRIPT = '''
-(
-  out=$("$@")
-  if [ "$out" = "default" ]; then
-    if command -v xdg-open >/dev/null 2>&1; then
-      exec xdg-open "$UPCRON_URL" >/dev/null 2>&1
-    elif command -v gio >/dev/null 2>&1; then
-      exec gio open "$UPCRON_URL" >/dev/null 2>&1
-    fi
-  fi
-  exit 0
-) >/dev/null 2>&1 &
+# A detached helper owns the click lifecycle. It shows a sticky notification,
+# waits for the "default" action, opens the URL, then re-shows the SAME
+# notification (--replace-id) so it stays on screen until the user dismisses
+# it. Running it as a child (not a thread) means a click still works after
+# `upcron notify-test` or any other one-shot command has exited.
+_ACTION_PY = r'''
+import json, shutil, subprocess, sys
+p = json.loads(sys.argv[1])
+cmd = list(p["cmd"])
+url = p["url"]
+replace = ""
+while True:
+    run = list(cmd)
+    if replace:
+        run += ["-r", str(replace)]
+    run += ["-p"]
+    try:
+        out = subprocess.run(run, capture_output=True, text=True).stdout.splitlines()
+    except Exception:
+        break
+    lines = [x.strip() for x in out if x.strip()]
+    if not lines:
+        break
+    ident = next((x for x in lines if x.isdigit()), lines[0])
+    action = next((x for x in lines if not x.isdigit()), "")
+    if action not in ("default", "0"):
+        break
+    opener = None
+    if shutil.which("xdg-open"):
+        opener = ["xdg-open", url]
+    elif shutil.which("gio"):
+        opener = ["gio", "open", url]
+    if opener:
+        try:
+            subprocess.Popen(opener, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except Exception:
+            pass
+    # The daemon closes a notification after an action; bring it straight back
+    # so only an explicit dismissal by the user removes it.
+    replace = ident
 '''
 
 
@@ -132,25 +157,23 @@ def notify(
     summary: str,
     body: str = "",
     urgency: str = "normal",
-    sticky: bool = False,
+    sticky: bool = True,
     url: str = "",
 ) -> None:
-    """Fire a desktop notification via notify-send (Linux/Plasma).
+    """Fire a sticky desktop notification via notify-send (Linux/Plasma).
 
-    When a URL is given and the installed notify-send supports actions, the
-    notification is clickable: choosing "Open job" (or clicking the body)
-    opens it in the browser. The waiting is done by a detached helper so it
-    survives the caller exiting.
+    A notification stays on screen until the user dismisses it. When a URL is
+    given and notify-send supports actions, clicking it (or its "Open job"
+    action) opens the URL in the browser and immediately re-shows the
+    notification, so a click never removes it.
     """
     if sys.platform == "win32":
         # Windows dispatch is handled by notify_windows; this is a fallback.
         log(f"notify-send unavailable on Windows: {summary[:80]}")
         return
     cmd = [NOTIFY_SEND, "-a", "Upwork Watcher", "-u", urgency]
-    if sticky:
-        cmd += ["-t", "0"]
-    else:
-        cmd += ["-t", "15000"]
+    # Sticky: only the user removes the notification, never a click or a timer.
+    cmd += ["-t", "0"]
     clickable = bool(url) and _supports_actions()
     if clickable:
         cmd += ["-A", "default=Open job"]
@@ -159,13 +182,13 @@ def notify(
         cmd.append(body)
     try:
         if clickable:
-            env = dict(session_env())
-            env["UPCRON_URL"] = url
+            payload = json.dumps({"cmd": cmd, "url": url})
             proc = subprocess.Popen(
-                ["/bin/sh", "-c", _ACTION_SCRIPT, "sh", *cmd],
-                env=env,
+                [sys.executable, "-c", _ACTION_PY, payload],
+                env=session_env(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
             try:
