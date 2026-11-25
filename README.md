@@ -282,10 +282,11 @@ exponentially from 30s to 30 min; a successful check resets it immediately.
   notification is `resident`, so it stays on screen until **you** dismiss it —
   clicking never removes it. On servers without that hint support, the app
   re-shows it after a click instead.
-- **Windows:** sent as Windows toasts (`windows-toasts`); clicking opens the job.
-  Toast lifetime is controlled by Windows notification settings, not by the app.
-  Use `notify-test` / `doctor --send-test` and check notification settings/Focus
-  Assist if nothing appears.
+- **Windows:** sent as Windows toasts (`windows-toasts`) with the Reminder
+  scenario; clicking opens the job and the toast is re-shown so it stays until
+  you dismiss it. Toast lifetime ultimately depends on Windows notification
+  settings. Use `notify-test` / `doctor --send-test` and check notification
+  settings/Focus Assist if nothing appears.
 - **Termux:** Android notifications via Termux:API (`-t` / `tsetup`); tapping
   opens the job URL.
 

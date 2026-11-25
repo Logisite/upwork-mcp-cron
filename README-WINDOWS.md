@@ -153,8 +153,14 @@ Key commands:
 
 ## Notifications
 
-- Toasts are sent with `windows-toasts`.
-- Clicking a job toast opens the job URL in your browser.
+- Toasts are sent with `windows-toasts`, using the **Reminder** scenario and a
+  **long** duration so they stay on screen until you act on them.
+- Clicking the toast body or its **Open job** button opens the job URL in your
+  browser. Windows normally removes a toast on activation, so the app shows the
+  same toast again immediately — a click does not remove the notification.
+- Only **you** dismissing it (the × button / clearing the Action Center) removes
+  it. If the interactable toaster is unavailable, the app falls back to a basic
+  toast; that toast still reappears after a click.
 - If toasts do not appear, run `doctor --send-test` and check:
   - **Settings → System → Notifications** (notifications enabled)
   - **Focus Assist / Do not disturb**
