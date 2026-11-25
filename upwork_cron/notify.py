@@ -29,6 +29,25 @@ import json, shutil, subprocess, sys
 p = json.loads(sys.argv[1])
 cmd = list(p["cmd"])
 url = p["url"]
+
+def has_persistence():
+    if not shutil.which("gdbus"):
+        return False
+    try:
+        out = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+             "--object-path", "/org/freedesktop/Notifications", "--method",
+             "org.freedesktop.Notifications.GetCapabilities"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        return "persistence" in out
+    except Exception:
+        return False
+
+# With the `resident` hint, a server that supports persistence keeps the
+# notification on screen after the action. Only re-show it ourselves on older
+# servers that ignore that hint.
+resident = has_persistence()
 replace = ""
 while True:
     run = list(cmd)
@@ -58,8 +77,8 @@ while True:
                              start_new_session=True)
         except Exception:
             pass
-    # The daemon closes a notification after an action; bring it straight back
-    # so only an explicit dismissal by the user removes it.
+    if resident:
+        break
     replace = ident
 '''
 
@@ -172,8 +191,9 @@ def notify(
         log(f"notify-send unavailable on Windows: {summary[:80]}")
         return
     cmd = [NOTIFY_SEND, "-a", "Upwork Watcher", "-u", urgency]
-    # Sticky: only the user removes the notification, never a click or a timer.
-    cmd += ["-t", "0"]
+    # Sticky: no timer removes it. `resident` additionally tells a compliant
+    # server to keep it on screen after an action is invoked (click).
+    cmd += ["-t", "0", "-h", "boolean:resident:true"]
     clickable = bool(url) and _supports_actions()
     if clickable:
         cmd += ["-A", "default=Open job"]

@@ -278,9 +278,10 @@ exponentially from 30s to 30 min; a successful check resets it immediately.
 ## Notifications
 
 - **Linux (Plasma):** sent via `notify-send`; click the notification body (on
-  Plasma) or its **Open job** action to open the job in your browser. The click
-  re-shows the notification instead of removing it: notifications are sticky
-  and stay until **you** dismiss them.
+  Plasma) or its **Open job** action to open the job in your browser. The
+  notification is `resident`, so it stays on screen until **you** dismiss it —
+  clicking never removes it. On servers without that hint support, the app
+  re-shows it after a click instead.
 - **Windows:** sent as Windows toasts (`windows-toasts`); clicking opens the job.
   Toast lifetime is controlled by Windows notification settings, not by the app.
   Use `notify-test` / `doctor --send-test` and check notification settings/Focus
